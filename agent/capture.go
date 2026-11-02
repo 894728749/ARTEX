@@ -26,6 +26,9 @@ import (
 // contiguous run is coalesced into a single record so the trace shows whole
 // messages, not dozens of fragments.
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	if control := ControlFrom(ctx); control != nil {
+		opts.Hooks = control.Hooks(opts.Hooks)
+	}
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 	return captureRunSession(ctx, s, input, emit)
@@ -35,6 +38,26 @@ func captureRun(ctx context.Context, opts agentcore.Options, input string, emit 
 // multiple prompts on the SAME conversation (e.g. a settlement round that reuses
 // the worker's accumulated context after the main run hit max_turns).
 func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	control := ControlFrom(ctx)
+	for {
+		text, reason, err := captureRunSessionOnce(ctx, s, input, emit)
+		if control == nil {
+			return text, reason, err
+		}
+		if err != nil || ctx.Err() != nil || reason != harness.ReasonCompleted {
+			if left := control.Close(); len(left) > 0 && emit != nil {
+				emit(db.Activity{Kind: "text", IsError: true, Summary: "本轮结束，以下引导尚未处理，请重新发送", Detail: strings.Join(left, "\n\n")})
+			}
+			return text, reason, err
+		}
+		input = control.NextOrSeal()
+		if input == "" {
+			return text, reason, err
+		}
+	}
+}
+
+func captureRunSessionOnce(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason

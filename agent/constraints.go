@@ -19,7 +19,7 @@ func constraintBlock(ts *db.ExplorationStore) string {
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
-	var allow, deny []string
+	var allow, deny, rules []string
 	for _, c := range rows {
 		text := strings.TrimSpace(c.Text)
 		if text == "" {
@@ -27,11 +27,13 @@ func constraintBlock(ts *db.ExplorationStore) string {
 		}
 		if c.Kind == "allow" {
 			allow = append(allow, "- "+text)
-		} else {
+		} else if c.Kind == "deny" {
 			deny = append(deny, "- "+text)
+		} else if c.Kind == "rule" {
+			rules = append(rules, "- "+text)
 		}
 	}
-	if len(allow) == 0 && len(deny) == 0 {
+	if len(allow) == 0 && len(deny) == 0 && len(rules) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -43,6 +45,10 @@ func constraintBlock(ts *db.ExplorationStore) string {
 	if len(deny) > 0 {
 		b.WriteString("\n禁止的操作：\n")
 		b.WriteString(strings.Join(deny, "\n"))
+	}
+	if len(rules) > 0 {
+		b.WriteString("\n规则：\n")
+		b.WriteString(strings.Join(rules, "\n"))
 	}
 	b.WriteString("\n（发现约束之外的新目标/新端口/新主机，不等于获得授权：除非它落在上述允许范围内，否则记为 out-of-scope 事实并跳过，不得为其派生意图或执行动作。）")
 	return b.String()

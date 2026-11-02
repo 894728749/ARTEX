@@ -57,7 +57,6 @@ import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
-import { isBtwCommand } from "@/lib/side-questions";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -158,7 +157,6 @@ function Composer({
   onPickFiles,
   onRemoveAttachment,
   uploading,
-  allowBtw,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -174,7 +172,6 @@ function Composer({
   onPickFiles?: (files: File[]) => void;
   onRemoveAttachment?: (path: string) => void;
   uploading?: boolean;
-  allowBtw?: boolean;
 }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
@@ -245,30 +242,22 @@ function Composer({
           rows={1}
           placeholder={placeholder}
           value={value}
-          disabled={disabled && !(running && allowBtw)}
+          disabled={disabled}
           onValueChange={onChange}
           onKeyDown={onKeyDown}
         />
-        {running && allowBtw && isBtwCommand(value) && (
-          <Button size="icon" onClick={onSend} aria-label="发送旁路问题" title="发送旁路问题">
-            <ArrowUpIcon />
-          </Button>
-        )}
-        {running ? (
-          // while a run is in flight the send button becomes a stop button —
-          // aborts just this session (the trigger queue keeps going).
+        <Button
+          size="icon"
+          onClick={onSend}
+          disabled={disabled || (!value.trim() && atts.length === 0)}
+          title="发送引导"
+          aria-label="发送引导"
+        >
+          <ArrowUpIcon />
+        </Button>
+        {running && (
           <Button size="icon" variant="destructive" onClick={onStop} disabled={stopDisabled} title="停止本次运行">
             <Square className="size-3.5 fill-current" />
-          </Button>
-        ) : (
-          <Button
-            size="icon"
-            onClick={onSend}
-            disabled={disabled || (!value.trim() && atts.length === 0)}
-            title="发送消息"
-            aria-label="发送消息"
-          >
-            <ArrowUpIcon />
           </Button>
         )}
       </div>
@@ -607,14 +596,23 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
-  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE),
+    [conv.id],
+  );
   const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
     setMessages((prev) => mergeActivities(page.items, prev));
     earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
     hasMoreRef.current = page.hasMore;
     setHasMore(page.hasMore);
   }, []);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    historyLoaded,
+    messages,
+    loadFocusPage,
+    mergeFocusPage,
+  );
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -726,7 +724,7 @@ function ChatView({
     const msg = input.trim();
     const atts = attachments;
     if (side.handleCommand(msg, () => setInput(""))) return;
-    if ((!msg && atts.length === 0) || sending || running) return;
+    if ((!msg && atts.length === 0) || sending) return;
     setSending(true);
     setInput("");
     setAttachments([]);
@@ -804,7 +802,13 @@ function ChatView({
               {hasMore && (
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+              <Transcript
+                activity={messages}
+                live={running}
+                chat
+                fetchDetail={fetchDetail}
+                focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+              />
             </>
           )}
         </div>
@@ -814,9 +818,8 @@ function ChatView({
         value={input}
         onChange={setInput}
         onSend={send}
-        disabled={running || sending}
-        allowBtw
-        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，@ 引用记录，Enter 发送"}
+        disabled={sending}
+        placeholder={running ? "Agent 正在运行；引导会在工具边界处理" : "输入消息，@ 引用记录，Enter 发送"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}
@@ -1050,15 +1053,18 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [sourceRequested, setSourceRequested] = React.useState(false);
   const [convsLoaded, setConvsLoaded] = React.useState(false);
-  const selectConversation = React.useCallback((id: number | null) => {
-    if (id !== selectedId) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("approval");
-      setSourceRequested(false);
-      window.history.replaceState(null, "", url);
-    }
-    setSelectedId(id);
-  }, [selectedId]);
+  const selectConversation = React.useCallback(
+    (id: number | null) => {
+      if (id !== selectedId) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("approval");
+        setSourceRequested(false);
+        window.history.replaceState(null, "", url);
+      }
+      setSelectedId(id);
+    },
+    [selectedId],
+  );
 
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
@@ -1085,7 +1091,10 @@ export default function ChatPage() {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
+      if (seq === conversationListSeq.current) {
+        setConvs(items);
+        setConvsLoaded(true);
+      }
     } catch {
       // Preserve the selected transcript and list on a transient poll failure.
     }

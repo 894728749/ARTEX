@@ -541,6 +541,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
+  const [taskLifecycle, setTaskLifecycle] = React.useState<{ status: string; paused: boolean }>({
+    status: "",
+    paused: false,
+  });
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -798,6 +802,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     return () => {
       alive = false;
       clearInterval(t);
+    };
+  }, [taskId]);
+
+  React.useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void Promise.all([api.task(taskId), api.stats(taskId).catch(() => null)])
+        .then(([task, stats]) => {
+          if (!alive) return;
+          setTaskLifecycle({
+            status: task.status,
+            paused: stats?.active_task?.paused ?? task.paused ?? task.status === "paused",
+          });
+        })
+        .catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
     };
   }, [taskId]);
 
@@ -1495,7 +1520,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const text = input.trim();
     const atts = attachments;
     if (side.handleCommand(text, () => setInput(""))) return;
-    if ((!text && atts.length === 0) || sending || mainBusy) return;
+    if ((!text && atts.length === 0) || sending) return;
     // No optimistic echo: the backend persists+broadcasts the human turn before it
     // returns, so it streams back over SSE (worker="mainagent") with its real DB
     // seq — the transcript renders it from server data like every other step. Clear
@@ -1506,9 +1531,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     chatStatusRequestRef.current++;
     api
       .chat(text, taskId, atts.length > 0 ? atts : undefined, active.seg ?? 0)
-      .then(({ mode }) => {
+      .then(({ mode, status }) => {
         chatStatusRequestRef.current++;
-        setMainChatRunning(mode === "llm");
+        if (status !== "steering") setMainChatRunning(mode === "llm");
+        else setMainChatRunning(true);
       })
       .catch((e) => {
         setInput(text); // restore so the user doesn't lose their text / attachments
@@ -1522,7 +1548,17 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const intentId = active.intent_id;
     const message = workerMessage.trim();
     if (side.handleCommand(message, () => setWorkerMessage(""))) return;
-    if (!intentId || active.inherited || active.status !== "paused" || workerMessageSending || !message) return;
+    if (
+      !intentId ||
+      active.inherited ||
+      !["running", "paused"].includes(active.status) ||
+      workerMessageSending ||
+      !message ||
+      taskLifecycle.paused ||
+      taskLifecycle.status === "paused" ||
+      ["done", "failed", "timeout"].includes(taskLifecycle.status)
+    )
+      return;
     if (workerMessageCharCount(message) > MAX_WORKER_MESSAGE_CHARS) {
       toast.error(`消息不能超过 ${MAX_WORKER_MESSAGE_CHARS} 个字符`);
       return;
@@ -1538,7 +1574,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         patchIntentState(intentId, result.state);
         setWorkerMessage("");
         setWorkerMessageRequestId("");
-        toast.success(`消息已发送给 Worker #${intentId}，已立即继续执行`);
+        toast.success(
+          active.status === "running"
+            ? `引导已发送给 Worker #${intentId}，会在当前工具结束后处理`
+            : `消息已发送给 Worker #${intentId}，已继续执行`,
+        );
       })
       .catch((error) => {
         toast.error(`发送失败：${(error as Error).message || "请稍后重试"}`);
@@ -1946,7 +1986,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     rows={1}
                     aria-label="给主 Agent 发消息"
                     placeholder={
-                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                      mainBusy
+                        ? "主 Agent 正在运行；引导会在当前工具结束后处理"
+                        : "给主 Agent 发消息，@ 引用漏洞、资产等…"
                     }
                     value={input}
                     disabled={sending}
@@ -1963,20 +2005,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       size="icon-xs"
                       variant="ghost"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={mainBusy || uploading}
+                      disabled={uploading}
                       title="上传文件"
                       aria-label="上传文件"
                     >
                       {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
                     </InputGroupButton>
-                    {mainBusy && isBtwCommand(input) && (
-                      <InputGroupButton size="icon-xs" onClick={send} aria-label="发送旁路问题">
-                        <ArrowUpIcon />
-                      </InputGroupButton>
-                    )}
-                    {mainBusy ? (
+                    {mainBusy && (
                       <InputGroupButton
-                        className="ml-auto"
                         size="icon-xs"
                         variant="destructive"
                         onClick={stop}
@@ -1986,19 +2022,18 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       >
                         {stopping ? <Loader2Icon className="animate-spin" /> : <SquareIcon />}
                       </InputGroupButton>
-                    ) : (
-                      <InputGroupButton
-                        className="ml-auto"
-                        size="icon-xs"
-                        variant="default"
-                        onClick={send}
-                        disabled={(!input.trim() && attachments.length === 0) || sending}
-                        title="发送消息"
-                        aria-label="发送消息"
-                      >
-                        {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
-                      </InputGroupButton>
                     )}
+                    <InputGroupButton
+                      className="ml-auto"
+                      size="icon-xs"
+                      variant="default"
+                      onClick={send}
+                      disabled={(!input.trim() && attachments.length === 0) || sending}
+                      title="发送引导"
+                      aria-label="发送引导"
+                    >
+                      {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
+                    </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
               </div>
@@ -2011,7 +2046,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     inputGroup
                     rows={1}
                     aria-label={`给 Worker #${active.intent_id} 发消息`}
-                    placeholder={`给 Worker #${active.intent_id} 发消息，@ 引用记录，调整执行方向…`}
+                    placeholder={
+                      active.status === "running"
+                        ? `Worker #${active.intent_id} 正在运行；引导会在当前工具结束后处理`
+                        : `给 Worker #${active.intent_id} 发消息，@ 引用记录，调整执行方向…`
+                    }
                     value={workerMessage}
                     onValueChange={(value) => {
                       setWorkerMessage(value);
@@ -2022,7 +2061,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       event.preventDefault();
                       sendWorkerChat();
                     }}
-                    disabled={workerMessageSending}
+                    disabled={
+                      workerMessageSending ||
+                      taskLifecycle.paused ||
+                      ["done", "failed", "timeout"].includes(taskLifecycle.status)
+                    }
                     aria-invalid={workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS}
                     className="max-h-36 min-h-9 overflow-y-auto"
                   />
@@ -2035,14 +2078,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     >
                       {workerMessageCharCount(workerMessage)}/{MAX_WORKER_MESSAGE_CHARS}
                     </span>
-                    {active.status === "running" && isBtwCommand(workerMessage) && (
-                      <InputGroupButton size="icon-xs" onClick={sendWorkerChat} aria-label="发送旁路问题">
-                        <ArrowUpIcon />
-                      </InputGroupButton>
-                    )}
                     {active.status === "running" ? (
                       <InputGroupButton
-                        className="ml-auto"
                         size="icon-xs"
                         variant="destructive"
                         onClick={() => void controlWorker(active, "pause")}
@@ -2073,22 +2110,26 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                             "直接继续"
                           )}
                         </InputGroupButton>
-                        <InputGroupButton
-                          size="icon-xs"
-                          variant="default"
-                          onClick={sendWorkerChat}
-                          disabled={
-                            workerMessageSending ||
-                            !workerMessage.trim() ||
-                            workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS
-                          }
-                          title="发送消息"
-                          aria-label="发送消息"
-                        >
-                          {workerMessageSending ? <Spinner /> : <ArrowUpIcon />}
-                        </InputGroupButton>
                       </>
                     )}
+                    <InputGroupButton
+                      className="ml-auto"
+                      size="icon-xs"
+                      variant="default"
+                      onClick={sendWorkerChat}
+                      disabled={
+                        workerMessageSending ||
+                        !workerMessage.trim() ||
+                        workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS ||
+                        taskLifecycle.paused ||
+                        taskLifecycle.status === "paused" ||
+                        ["done", "failed", "timeout"].includes(taskLifecycle.status)
+                      }
+                      title="发送引导"
+                      aria-label="发送引导"
+                    >
+                      {workerMessageSending ? <Spinner /> : <ArrowUpIcon />}
+                    </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
               </div>

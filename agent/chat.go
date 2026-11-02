@@ -122,6 +122,19 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID})
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
+	if agentKey == "finding_reviewer" {
+		// Enforce the reviewer capability boundary even if an administrator has
+		// accidentally bound a skill, MCP, or execution tool to this agent.
+		allowed := map[string]bool{"get_finding_review_context": true, "consolidate_findings": true, "link_findings": true, "finish_finding_review": true}
+		filtered := tools[:0]
+		for _, t := range tools {
+			if allowed[t.Name()] {
+				filtered = append(filtered, t)
+			}
+		}
+		tools, def = filtered, DeferredInfo{}
+		ws.Enabled = false
+	}
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
 	opts := agentcore.Options{
@@ -132,7 +145,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		EnableWebFetch:  agentKey != "finding_reviewer",
 		WebFetchProxy:   c.proxyAddr,
 		WebFetchCACert:  c.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。

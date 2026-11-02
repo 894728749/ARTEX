@@ -43,6 +43,7 @@ import { AssetsTab } from "./_tabs/assets-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
+import { FindingRelationsTab } from "./_tabs/finding-relations-tab";
 import { GraphTab } from "./_tabs/graph-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
 import { OverviewTab } from "./_tabs/overview-tab";
@@ -56,6 +57,7 @@ const TABS = [
   { value: "graph", label: "探索链路" },
   { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
+  { value: "finding-relations", label: "漏洞关联" },
   { value: "retests", label: "复测" },
   { value: "assets", label: "测试资产" },
   { value: "coverage", label: "资产覆盖图" },
@@ -208,6 +210,7 @@ function TaskDetailInner() {
   const id = searchParams.get("id") ?? "";
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
+  const [pausingAfterTool, setPausingAfterTool] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("sessions");
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
@@ -284,6 +287,22 @@ function TaskDetailInner() {
       toast.success(next ? "已暂停探索" : "已恢复探索");
     } catch (e) {
       toast.error("操作失败：" + (e as Error).message);
+    }
+  }
+
+  async function pauseAfterTool() {
+    if (!task || pausingAfterTool || terminal || task.status === "paused") return;
+    setPausingAfterTool(true);
+    try {
+      const result = await api.pauseTaskAfterTool(id);
+      if (result.paused && result.status === "paused") {
+        setPaused(true);
+        toast.success("当前工具结束后暂停；后续队列不会启动");
+      }
+    } catch (e) {
+      toast.error("温和暂停失败：" + (e as Error).message);
+    } finally {
+      setPausingAfterTool(false);
     }
   }
 
@@ -396,6 +415,12 @@ function TaskDetailInner() {
             {controlIcon}
             {controlLabel}
           </Button>
+          {!terminal && !paused && task.status !== "paused" && (
+            <Button size="sm" variant="outline" onClick={pauseAfterTool} disabled={pausingAfterTool}>
+              {pausingAfterTool ? <Spinner /> : <PauseIcon data-icon="inline-start" />}
+              温和暂停
+            </Button>
+          )}
         </div>
         <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
         {/* Tabs */}
@@ -431,6 +456,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="findings" className="mt-0">
           <FindingsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="finding-relations" className="mt-0">
+          <FindingRelationsTab taskId={id} />
         </TabsContent>
         <TabsContent value="retests" className="mt-0">
           <RetestsTab key={id} taskId={id} />

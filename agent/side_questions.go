@@ -10,6 +10,9 @@ import (
 )
 
 func attachSideCapture(ctx context.Context, opts *agentcore.Options) context.Context {
+	if control := ControlFrom(ctx); control != nil {
+		opts.Hooks = control.Hooks(opts.Hooks)
+	}
 	ri := RunInfoFrom(ctx)
 	p := sidequestion.Parent{TaskID: ri.TaskID, ExplorationID: ri.ExplorationID, IntentID: ri.IntentID}
 	if strings.HasPrefix(ri.SessionID, "conv-") {

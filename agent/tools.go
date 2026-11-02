@@ -1541,7 +1541,7 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 
 type constraintItem struct {
 	Text string `json:"text"`
-	Type string `json:"type"` // allow | deny
+	Type string `json:"type"` // allow | deny | rule
 }
 
 // addOneConstraint 落一条操作约束到 task_constraints。origin 取 t.worker(缺省 system):
@@ -1555,8 +1555,8 @@ func (t *ToolSet) addOneConstraint(it constraintItem) (int64, error) {
 	if kind == "" {
 		kind = "deny" // 默认按禁止处理:未标注类型时更保守
 	}
-	if kind != "allow" && kind != "deny" {
-		return 0, fmt.Errorf("type 必须是 allow 或 deny")
+	if kind != "allow" && kind != "deny" && kind != "rule" {
+		return 0, fmt.Errorf("type 必须是 allow、deny 或 rule")
 	}
 	return t.ts.AddConstraint(kind, text, t.worker)
 }
@@ -1566,14 +1566,14 @@ func (t *ToolSet) addOneConstraint(it constraintItem) (int64, error) {
 // 端改描述/schema、按 agent 绑定。约束会被注入 planner/worker 的系统提示以约束探索边界。
 func (t *ToolSet) setConstraints() actool.CoreTool {
 	return writeTool("set_constraints",
-		"给【本任务】新增操作约束,用来框定探索边界:type=allow(允许做的操作)或 deny(禁止做的操作)。\n"+
+		"给【本任务】新增操作约束,用来框定探索边界:type=allow(允许做的操作)、deny(禁止做的操作)或 rule(其他明确规则/要求)。\n"+
 			"约束=对『可以/不可以做哪些操作』的规定(如『仅测当前端口,不扫其他端口』『禁止对生产库做写操作』『只允许被动侦察』),不是目标、也不是攻击步骤。\n"+
 			"★优先批量:多条放进 constraints 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 constraints 直接给顶层 text/type。\n"+
-			"只登记任务目标/描述里【明确写出】的约束,不要臆造;拿不准类型时用 deny(更保守)。",
+			"只登记任务目标/描述里【明确写出】的约束,不要臆造;allow/deny用于许可边界，其他明确规则用 rule。",
 		obj(map[string]any{
-			"constraints": map[string]any{"type": "array", "description": "【优先用这个】要新增的约束数组,按顺序处理。每个元素:text(必填,一条约束)+ type(allow|deny)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"constraints": map[string]any{"type": "array", "description": "【优先用这个】要新增的约束数组,按顺序处理。每个元素:text(必填,一条约束)+ type(allow|deny|rule)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"text":        str("[单条] 一条操作约束的内容"),
-			"type":        str("[单条] allow(允许)或 deny(禁止);缺省按 deny 处理"),
+			"type":        str("[单条] allow(允许)、deny(禁止)或 rule(其他明确规则);缺省按 deny 处理"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {

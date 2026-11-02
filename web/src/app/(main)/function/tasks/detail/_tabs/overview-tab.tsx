@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { toast } from "sonner";
+
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -120,6 +122,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [rerunning, setRerunning] = React.useState<Set<string>>(new Set());
   // 测试范围列表 + 新增表单状态。
   const [scope, setScope] = React.useState<TaskScopeRow[]>([]);
+  const [scopeExpanded, setScopeExpanded] = React.useState(false);
+  const [pausingAfterTool, setPausingAfterTool] = React.useState(false);
   const [scopeKind, setScopeKind] = React.useState<TaskScopeRow["kind"]>("root_domain");
   const [scopeValueInput, setScopeValueInput] = React.useState("");
   const [scopeBusy, setScopeBusy] = React.useState(false);
@@ -347,6 +351,29 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     }
   };
 
+  const pauseAfterTool = async () => {
+    if (
+      pausingAfterTool ||
+      !task ||
+      task.paused ||
+      task.status === "paused" ||
+      ["done", "failed", "timeout"].includes(task.status)
+    )
+      return;
+    setPausingAfterTool(true);
+    try {
+      const result = await api.pauseTaskAfterTool(taskId);
+      if (result.paused && result.status === "paused") {
+        setTask((current) => (current ? { ...current, paused: true } : current));
+        toast.success("当前工具结束后暂停；后续队列不会启动");
+      }
+    } catch (e) {
+      toast.error("温和暂停失败：" + (e as Error).message);
+    } finally {
+      setPausingAfterTool(false);
+    }
+  };
+
   React.useEffect(() => {
     let cancelled = false;
     let loading = false;
@@ -434,10 +461,15 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     <div className="flex flex-col gap-4">
       {/* 原始任务描述与目标(创建时填写的),置顶便于随时回看。 */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle className="flex items-center gap-2 text-base">
             <TargetIcon className="size-4 text-primary" /> 任务描述与目标
           </CardTitle>
+          {task && !task.paused && task.status !== "paused" && !["done", "failed", "timeout"].includes(task.status) && (
+            <Button size="sm" variant="outline" onClick={() => void pauseAfterTool()} disabled={pausingAfterTool}>
+              {pausingAfterTool ? "正在请求…" : "温和暂停"}
+            </Button>
+          )}
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
@@ -594,6 +626,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             >
               <NativeSelectOption value="deny">禁止</NativeSelectOption>
               <NativeSelectOption value="allow">允许</NativeSelectOption>
+              <NativeSelectOption value="rule">规则</NativeSelectOption>
             </NativeSelect>
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
@@ -628,6 +661,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     >
                       <NativeSelectOption value="deny">禁止</NativeSelectOption>
                       <NativeSelectOption value="allow">允许</NativeSelectOption>
+                      <NativeSelectOption value="rule">规则</NativeSelectOption>
                     </NativeSelect>
                     <Input
                       className="h-7 min-w-56 flex-1 text-sm"
@@ -665,10 +699,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
                         c.kind === "allow"
                           ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                          : "bg-red-500/15 text-red-600 dark:text-red-400"
+                          : c.kind === "deny"
+                            ? "bg-red-500/15 text-red-600 dark:text-red-400"
+                            : "bg-blue-500/15 text-blue-600 dark:text-blue-400"
                       }`}
                     >
-                      {c.kind === "allow" ? "允许" : "禁止"}
+                      {c.kind === "allow" ? "允许" : c.kind === "deny" ? "禁止" : "规则"}
                     </span>
                     <span className="min-w-0 flex-1 break-words">{c.text}</span>
                     <Button
@@ -863,29 +899,43 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
           {/* 范围列表 */}
           {scope.length > 0 ? (
-            <div className="flex flex-col gap-1.5">
-              {scope.map((row) => (
-                <div key={row.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
-                  <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
-                    {SCOPE_KIND_LABELS[row.kind]}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{scopeValue(row)}</span>
-                  <span className="text-muted-foreground shrink-0 text-xs">{SCOPE_SOURCE_LABELS[row.source]}</span>
-                  {row.task_id.toString() === taskId ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 shrink-0 px-1.5"
-                      onClick={() => void removeScope(row)}
-                    >
-                      <Trash2Icon className="size-3.5 text-red-500" />
-                    </Button>
-                  ) : (
-                    <span className="text-muted-foreground shrink-0 text-xs">继承</span>
-                  )}
-                </div>
-              ))}
-            </div>
+            <>
+              {scope.length > 5 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="self-start"
+                  aria-expanded={scopeExpanded}
+                  onClick={() => setScopeExpanded((expanded) => !expanded)}
+                >
+                  {scopeExpanded ? "收起测试范围" : `展开全部测试范围（${scope.length} 条）`}
+                </Button>
+              )}
+              <div className="flex flex-col gap-1.5">
+                {(scopeExpanded || scope.length <= 5 ? scope : scope.slice(0, 5)).map((row) => (
+                  <div key={row.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
+                    <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
+                      {SCOPE_KIND_LABELS[row.kind]}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{scopeValue(row)}</span>
+                    <span className="text-muted-foreground shrink-0 text-xs">{SCOPE_SOURCE_LABELS[row.source]}</span>
+                    {row.task_id.toString() === taskId ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 shrink-0 px-1.5"
+                        onClick={() => void removeScope(row)}
+                      >
+                        <Trash2Icon className="size-3.5 text-red-500" />
+                      </Button>
+                    ) : (
+                      <span className="text-muted-foreground shrink-0 text-xs">继承</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           ) : (
             <p className="text-muted-foreground text-sm">暂无测试范围，添加后可作为资产覆盖度的分母。</p>
           )}

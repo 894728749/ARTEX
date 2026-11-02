@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/report"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -17,6 +18,11 @@ var FindingTrafficBindingEnabled func() bool
 
 func findingTrafficBindingEnabled() bool {
 	return FindingTrafficBindingEnabled != nil && FindingTrafficBindingEnabled()
+}
+
+// ValidateFindingReportPortability is shared with the report storage boundary.
+func ValidateFindingReportPortability(markdown string) error {
+	return report.ValidatePortableReport(markdown)
 }
 
 // Applied after ToolResolve: user descriptions and prompts remain intact, while
@@ -58,6 +64,9 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 			note = "\n交接已确认漏洞时，在对应提示的 traffic_refs 中保留已核实流量的 ID、用途、说明和顺序（单条放顶层，批量放对应 hints 元素），并在 text 中说明它证明的具体漏洞。调用方不能只交接文字而丢弃已有流量引用。未核实的候选不能作为证据传递。"
 		case "get_finding_traffic", "bind_finding_traffic", "list_findings", "list_task_findings", "node_detail", "get_task_node_detail", "update_finding_report":
 			note = findingIDGuidance
+			if tool.Name() == "update_finding_report" {
+				note += " 报告需可脱离ARTEX独立阅读：不要把平台内部 task/worker/finding/node/traffic 数字编号当证据引用；引用证据用用途名称及必要内容。不得写入执行机绝对路径或本机文件链接；保留目标路径、URL/API路径、CVE、版本、IP/端口等真实证据。报告标题不加序号，复现步骤可按自然顺序编号。"
+			}
 		}
 		if note != "" {
 			out[i] = DecorateTool(tool, tool.Description()+note, tool.InputSchema())

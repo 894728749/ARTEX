@@ -728,7 +728,7 @@ func (s *ExplorationStore) ListByKind(kind string, limit int) ([]*Node, error) {
 		limit = 500
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
-WHERE exploration_id=$1 AND kind=$2 ORDER BY id DESC LIMIT $3`, s.expID, kind, limit)
+WHERE exploration_id=$1 AND kind=$2 AND NOT (kind='finding' AND payload ? 'merged_into') ORDER BY id DESC LIMIT $3`, s.expID, kind, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +745,7 @@ func (s *ExplorationStore) ListByKindPage(kind string, before int64, limit int) 
 		limit = 300
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
-WHERE exploration_id=$1 AND kind=$2 AND ($3 <= 0 OR id < $3)
+WHERE exploration_id=$1 AND kind=$2 AND NOT (kind='finding' AND payload ? 'merged_into') AND ($3 <= 0 OR id < $3)
 ORDER BY id DESC LIMIT $4`, s.expID, kind, before, limit+1)
 	if err != nil {
 		return nil, false, err
@@ -766,7 +766,7 @@ ORDER BY id DESC LIMIT $4`, s.expID, kind, before, limit+1)
 // filter (payload->>'summary' ILIKE %q%). Fetches one extra row so the caller can
 // probe hasMore. Empty q = no filter. Newest-first by id.
 func (s *ExplorationStore) listByKindPageFiltered(kind string, before int64, limit int, q string) ([]*Node, error) {
-	where := `exploration_id=$1 AND kind=$2 AND ($3 <= 0 OR id < $3)`
+	where := `exploration_id=$1 AND kind=$2 AND NOT (kind='finding' AND payload ? 'merged_into') AND ($3 <= 0 OR id < $3)`
 	args := []any{s.expID, kind, before}
 	if q != "" {
 		args = append(args, "%"+q+"%")
@@ -785,7 +785,7 @@ WHERE `+where+` ORDER BY id DESC LIMIT $`+fmt.Sprintf("%d", len(args)), args...)
 // countByKindFiltered counts nodes of a kind under the same summary filter, for a
 // page's total. Empty q = count all of that kind.
 func (s *ExplorationStore) countByKindFiltered(kind, q string) (int, error) {
-	where := `exploration_id=$1 AND kind=$2`
+	where := `exploration_id=$1 AND kind=$2 AND NOT (kind='finding' AND payload ? 'merged_into')`
 	args := []any{s.expID, kind}
 	if q != "" {
 		args = append(args, "%"+q+"%")
@@ -1182,7 +1182,7 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id
 
 // Stats returns node counts grouped by kind (for dashboard).
 func (s *ExplorationStore) Stats() (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 GROUP BY kind`, s.expID)
+	rows, err := s.db.Query(`SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 AND NOT (kind='finding' AND payload ? 'merged_into') GROUP BY kind`, s.expID)
 	if err != nil {
 		return nil, err
 	}
@@ -1357,7 +1357,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			       COUNT(*) FILTER (WHERE severity='medium')   AS medium,
 			       COUNT(*) FILTER (WHERE severity='low')      AS low
 			FROM findings
-			WHERE task_id=task.id
+			WHERE task_id=task.id AND merged_into IS NULL
 		) finding_metrics ON true
 		WHERE task.deleted_at IS NULL`)
 	if err != nil {

@@ -73,7 +73,7 @@ func (s *Server) addConstraint(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := normalizeConstraintKind(body.Kind)
 	if kind == "" {
-		writeErr(w, 400, "kind 必须是 allow 或 deny")
+		writeErr(w, 400, "kind 必须是 allow、deny 或 rule")
 		return
 	}
 	id, err := t.Store.AddConstraint(kind, text, "human")
@@ -117,7 +117,7 @@ func (s *Server) editConstraint(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := normalizeConstraintKind(body.Kind)
 	if kind == "" {
-		writeErr(w, 400, "kind 必须是 allow 或 deny")
+		writeErr(w, 400, "kind 必须是 allow、deny 或 rule")
 		return
 	}
 	if err := t.Store.UpdateConstraint(cid, kind, text); err != nil {
@@ -155,7 +155,7 @@ func (s *Server) deleteConstraint(w http.ResponseWriter, r *http.Request) {
 // normalizeConstraintKind lowercases + validates the kind; "" on invalid.
 func normalizeConstraintKind(k string) string {
 	k = strings.TrimSpace(strings.ToLower(k))
-	if k == "allow" || k == "deny" {
+	if k == "allow" || k == "deny" || k == "rule" {
 		return k
 	}
 	return ""

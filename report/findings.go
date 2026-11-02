@@ -63,8 +63,8 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 	}
 
 	b.WriteString("## 漏洞明细\n\n")
-	for i, f := range items {
-		fmt.Fprintf(&b, "### %d. [%s] %s\n\n", i+1, strings.ToUpper(nz(f.Severity, "info")), findingTitle(f))
+	for _, f := range items {
+		fmt.Fprintf(&b, "### [%s] %s\n\n", strings.ToUpper(nz(f.Severity, "info")), findingTitle(f))
 		if f.VulnClass != "" {
 			fmt.Fprintf(&b, "- **类别**：%s\n", f.VulnClass)
 		}
@@ -187,7 +187,7 @@ func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
 		out.WriteString("证据已变更，详细报告待更新。\n\n")
 	}
 	for i, b := range f.TrafficBindings {
-		fmt.Fprintf(&out, "%d. **证据 #%d · %s** — `%s %s`，状态码 %d\n", i+1, b.ID, b.Role, b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
+		fmt.Fprintf(&out, "%d. **%s 证据** — `%s %s`，状态码 %d\n", i+1, b.Role, b.Snapshot.Method, strings.ReplaceAll(b.Snapshot.URL, "`", "%60"), b.Snapshot.Status)
 		if b.Note != "" {
 			fmt.Fprintf(&out, "   %s\n", strings.ReplaceAll(b.Note, "\n", "\n   "))
 		}

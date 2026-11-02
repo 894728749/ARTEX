@@ -40,6 +40,7 @@ func jsonResult(v any) (actool.Result, error) {
 func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools := append(s.m.HostTools(), s.orchestrationTools()...)
 	tools = append(tools, s.findingRetestTools()...)
+	tools = append(tools, s.findingReviewTools()...)
 	tools = append(tools, s.platformTools()...) // 平台操作工具(建改 skill/工具/MCP，给 Auto 用)
 	custom, err := s.customTools()
 	if err != nil {
@@ -68,6 +69,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolListLLMProfiles(),
 		s.toolSpawnTask(),
 		s.toolPauseTask(),
+		s.toolPauseTaskAfterTool(),
 		s.toolGetTaskGraph(),
 		s.toolListTaskFindings(),
 		s.toolAddHint(),
@@ -425,7 +427,7 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 // task-agnostic, so this host tool needs no task_id / exploration store.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
-		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
+		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。报告应可独立阅读：不要把平台内部 task/worker/finding/node/traffic 数字 ID 当证据，不写执行机绝对路径或本机文件链接；引用证据用用途名称及必要内容。保留目标文件路径、URL/API路径、CVE、版本、IP/端口等真实证据，标题不加序号。",
 		objSchema(map[string]any{
 			"finding_id":       map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
 			"report":           strParam("详细报告全文,Markdown 格式"),
@@ -441,6 +443,9 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
+			}
+			if err := agent.ValidateFindingReportPortability(a.Report); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
 			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
@@ -477,6 +482,9 @@ func (s *Server) seedOrchestrationTools() {
 	for _, t := range s.orchestrationTools() {
 		schema, _ := json.Marshal(t.InputSchema())
 		bindings := autoAgents
+		if t.Name() == "pause_task_after_tool" {
+			bindings = json.RawMessage(`["auto","mainagent"]`)
+		}
 		if t.Name() == "bind_finding_traffic" {
 			bindings = json.RawMessage(`["reporter"]`)
 		}

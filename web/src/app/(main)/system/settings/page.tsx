@@ -371,7 +371,7 @@ export default function SystemSettingsPage() {
               操作约束注入
             </CardTitle>
             <CardDescription>
-              开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny 条目）拼进对应 Agent
+              开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny/rule 条目）拼进对应 Agent
               的系统提示，用来框定探索边界（如「仅测当前端口」「禁止爆破」）。
               <br />
               可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>

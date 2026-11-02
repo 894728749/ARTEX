@@ -125,8 +125,10 @@ type Engine struct {
 	// Per-work control lets the planner kill a worker and lets the UI pause/cancel
 	// one intent without pausing the whole task. The done channel closes only after
 	// runWorkerStep has stopped writing and committed its final state.
-	workMu sync.Mutex
-	work   map[int64]*workExecution
+	workMu   sync.Mutex
+	work     map[int64]*workExecution
+	liveMu   sync.Mutex
+	liveRuns map[*agent.LiveControl]string
 
 	// steerBox queues planner course-corrections for a running work (keyed by intent
 	// id). The worker's PreToolUse hook drains it before its next tool call and hands
@@ -160,9 +162,10 @@ type taskRuntime struct {
 }
 
 type workExecution struct {
-	cancel context.CancelCauseFunc
-	done   chan error
-	action string // user action: pause | cancel
+	control *agent.LiveControl
+	cancel  context.CancelCauseFunc
+	done    chan error
+	action  string // user action: pause | cancel
 }
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
@@ -176,7 +179,14 @@ func (e *Engine) nextPlannerRound(taskID string) int {
 // Pause stops a task: marks it paused AND cancels any in-flight planner/worker run
 // for it (a long worker.Execute would otherwise keep going until it finishes).
 func (e *Engine) Pause(taskID string, cause error) {
+	e.liveMu.Lock()
 	e.paused.Store(taskID, true)
+	for c, id := range e.liveRuns {
+		if id == taskID {
+			c.Cancel(cause)
+		}
+	}
+	e.liveMu.Unlock()
 	e.cancelExec(taskID, cause)
 }
 
@@ -193,6 +203,13 @@ func (e *Engine) BeginDelete(taskID string) bool {
 	e.paused.Store(taskID, true)
 	e.deleteMu.Unlock()
 	e.cancelExec(taskID, agent.AbortTaskDeleted)
+	e.liveMu.Lock()
+	for c, id := range e.liveRuns {
+		if id == taskID {
+			c.Cancel(agent.AbortTaskDeleted)
+		}
+	}
+	e.liveMu.Unlock()
 	return true
 }
 
@@ -868,6 +885,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
+		runCtx, runCancel := context.WithCancelCause(ectx)
+		runCtx, _, releaseLive := e.liveRun(runCtx, t.ID, runCancel, false)
+		defer releaseLive()
+		defer runCancel(agent.AbortWorkFinished)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
 		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
@@ -877,8 +898,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		met, reason, err := planner.Plan(runCtx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
+		if e.IsPaused(t.ID) {
+			return
+		}
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
@@ -993,7 +1017,12 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
+	workCtx, liveControl, releaseLive := e.liveRun(workCtx, t.ID, workCancel, false)
+	defer releaseLive()
 	e.registerWork(intent.ID, workCancel)
+	e.workMu.Lock()
+	e.work[intent.ID].control = liveControl
+	e.workMu.Unlock()
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID
@@ -1065,6 +1094,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	var controlErr error
 	defer func() { completeWork(controlErr) }()
+	if errors.Is(workCause, agent.AbortPausedAfterTool) {
+		controlErr = transitionIntentState(t.Store, intent.ID, "running", "open")
+		return true
+	}
 	if action == "pause" {
 		controlErr = transitionIntentState(t.Store, intent.ID, "running", "paused")
 		if controlErr != nil {
@@ -1235,6 +1268,11 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 }
 
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
+	e.liveMu.Lock()
+	defer e.liveMu.Unlock()
+	if e.IsPaused(t.ID) || e.IsDeleting(t.ID) {
+		return nil
+	}
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
 		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {

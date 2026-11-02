@@ -68,6 +68,7 @@ type Server struct {
 	// concurrent messages don't corrupt the shared exp<id>-main transcript.
 	chatMu   sync.Mutex
 	chatBusy map[string]bool
+	chatLive sync.Map // busy key -> chatLiveRun; guarded with chatMu for admission
 	// chatCancel holds the cancel func for each in-flight conversation run (keyed by
 	// convBusyKey), so a manual stop can abort JUST that session's agent run. Set/
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
@@ -225,6 +226,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
+		if err := s.seedFindingReviewer(); err != nil {
+			log.Printf("[finding reviewer] seed: %v", err)
+		}
+		go s.runFindingReviewScheduler()
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
@@ -759,6 +764,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	s.registerFindingTraffic(mux)
+	s.registerFindingCollaboration(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
@@ -1124,8 +1130,8 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if req.Action != "pause" && req.Action != "resume" {
-		writeErr(w, 400, "action must be pause|resume")
+	if req.Action != "pause" && req.Action != "resume" && req.Action != "pause_after_tool" {
+		writeErr(w, 400, "action must be pause|pause_after_tool|resume")
 		return
 	}
 	result, err := s.applyTaskControl(t, req.Action)
@@ -3690,27 +3696,34 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
-	if s.chatBusy[t.ID] {
-		s.chatMu.Unlock()
-		writeErr(w, 409, "主 Agent 正在处理上一条消息，请稍候")
-		return
-	}
-	ctx, cancel := context.WithCancelCause(s.ctx)
-	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: req.Message})
-	s.chatBusy[t.ID] = true
-	s.chatCancel[t.ID] = cancel
-	s.chatMu.Unlock()
-
-	// The turn belongs to whichever main-agent segment the user is chatting in (any
-	// segment is interactive, like the top-level chat conversations). Stamp every
-	// mainagent row with it so this turn's transcript + activity land in that segment.
-	// Missing seg (older clients) falls back to the newest segment.
 	mainSeg := 0
 	if req.Seg != nil && *req.Seg >= 0 {
 		mainSeg = *req.Seg
 	} else {
 		mainSeg, _ = t.Store.CurrentMainSeg()
 	}
+	if s.chatBusy[t.ID] {
+		err := s.queueMainGuidance(t, mainSeg, req.Message, agentMessage, req.Attachments)
+		s.chatMu.Unlock()
+		if err != nil {
+			writeErr(w, 409, err.Error())
+			return
+		}
+		steeringAccepted(w)
+		return
+	}
+	ctx, cancel := context.WithCancelCause(s.ctx)
+	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: req.Message})
+	s.chatBusy[t.ID] = true
+	s.chatCancel[t.ID] = cancel
+	ctx, liveControl, releaseLive := s.engine.liveRun(ctx, t.ID, cancel, true)
+	s.chatLive.Store(t.ID, chatLiveRun{control: liveControl, seg: mainSeg})
+	s.chatMu.Unlock()
+
+	// The turn belongs to whichever main-agent segment the user is chatting in (any
+	// segment is interactive, like the top-level chat conversations). Stamp every
+	// mainagent row with it so this turn's transcript + activity land in that segment.
+	// Missing seg (older clients) falls back to the newest segment.
 	segPtr := &mainSeg
 
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
@@ -3733,6 +3746,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// handler returns immediately and the browser never needs to hold the request.
 		go func() {
 			defer func() {
+				releaseLive()
 				s.finishTaskChat(t.ID, cancel)
 			}()
 			// emit every step (thinking/tool_use/tool_result/text/result) so the main
@@ -3760,6 +3774,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	reply := s.fallbackChat(t, req.Message)
 	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
+	releaseLive()
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})
 }
@@ -3779,6 +3794,7 @@ func (s *Server) finishTaskChat(taskID string, cancel context.CancelCauseFunc) {
 	s.chatMu.Lock()
 	delete(s.chatBusy, taskID)
 	delete(s.chatCancel, taskID)
+	s.chatLive.Delete(taskID)
 	s.chatMu.Unlock()
 }
 

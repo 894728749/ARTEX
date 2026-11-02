@@ -41,6 +41,9 @@ import type {
   FindingGroupsPage,
   FindingQuery,
   FindingRetest,
+  FindingRelationEdge,
+  FindingRelations,
+  FindingReviewStatus,
   FindingStats,
   FindingStatus,
   FindingsPage,
@@ -314,6 +317,8 @@ export const api = {
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
   controlTask: (id: string, action: "pause" | "resume") =>
     post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+  pauseTaskAfterTool: (id: string) =>
+    post<{ paused: boolean; status: string }>(`/tasks/${id}/control`, { action: "pause_after_tool" }),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
     post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
   taskArchives: (input?: { page?: number; size?: number; q?: string; state?: string }) => {
@@ -394,7 +399,7 @@ export const api = {
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
 
   // ---- 操作约束管理（总览）----
-  // 本任务全部操作约束（allow/deny）。
+  // 本任务全部操作约束（allow/deny/rule）。
   taskConstraints: (id: string) =>
     get<{ constraints: TaskConstraint[] | null }>(`/tasks/${id}/constraints`).then((response) => ({
       constraints: arr(response.constraints),
@@ -402,7 +407,7 @@ export const api = {
   // 新增约束（不通知 planner，下一轮规划自然读到）。
   addConstraint: (id: string, text: string, kind: TaskConstraint["kind"]) =>
     post<TaskConstraint>(`/tasks/${id}/constraints`, { text, kind }),
-  // 修改约束（文本 + allow/deny）。
+  // 修改约束（文本 + allow/deny/rule）。
   updateConstraint: (id: string, constraintId: string, text: string, kind: TaskConstraint["kind"]) =>
     patch<TaskConstraint>(`/tasks/${id}/constraints/${constraintId}`, { text, kind }),
   // 删除约束。
@@ -556,6 +561,22 @@ export const api = {
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  findingRelations: async (taskId: string): Promise<FindingRelations> => {
+    const result = await get<FindingRelations>(`/tasks/${taskId}/finding-relations`);
+    return {
+      nodes: result.nodes.map((node) => ({ ...node, id: String(node.id) })),
+      edges: result.edges.map((edge) => ({ ...edge, id: String(edge.id), source: String(edge.source), target: String(edge.target) })),
+    };
+  },
+  addFindingRelation: (taskId: string, relation: Omit<FindingRelationEdge, "id">) =>
+    post<{ id: number }>(`/tasks/${taskId}/finding-relations`, { ...relation, source: Number(relation.source), target: Number(relation.target) }),
+  deleteFindingRelation: (taskId: string, relationId: string) =>
+    del<{ deleted: boolean }>(`/tasks/${taskId}/finding-relations/${encodeURIComponent(relationId)}`),
+  runFindingReview: (taskId: string) =>
+    post<{ accepted?: boolean; status?: string }>(`/tasks/${taskId}/finding-review`, {}),
+  findingReviewStatus: (taskId: string) => get<FindingReviewStatus>(`/tasks/${taskId}/finding-review-status`),
+  updateFindingReviewStatus: (taskId: string, input: { enabled?: boolean; batch_size?: number }) =>
+    patch<FindingReviewStatus>(`/tasks/${taskId}/finding-review-status`, input),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
@@ -825,8 +846,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -878,7 +898,11 @@ export const api = {
       { signal },
     ),
   chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
-    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
+    post<{ reply?: string; mode?: string; status?: string; accepted?: boolean }>(`/chat${tq(task)}`, {
+      message,
+      attachments,
+      seg,
+    }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {

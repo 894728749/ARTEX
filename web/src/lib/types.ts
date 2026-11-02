@@ -457,7 +457,7 @@ export interface TaskGoal {
 }
 
 // 约束管理卡片用的操作约束(allow=允许 / deny=禁止)。
-export type ConstraintKind = "allow" | "deny";
+export type ConstraintKind = "allow" | "deny" | "rule";
 export interface TaskConstraint {
   id: string;
   kind: ConstraintKind;
@@ -510,6 +510,40 @@ export interface Finding {
   inherited?: boolean;
   assets?: FindingAsset[];
   ts: string;
+}
+
+export type FindingRelationKind = "prerequisite" | "enables" | "supports" | "contradicts";
+export type FindingRelationStatus = "proposed" | "verified";
+export interface FindingRelationNode {
+  id: string;
+  name: string;
+  severity: Severity;
+  status: FindingStatus;
+}
+export interface FindingRelationEdge {
+  id: string;
+  source: string;
+  target: string;
+  kind: FindingRelationKind;
+  rationale: string;
+  evidence: string;
+  status: FindingRelationStatus;
+}
+export interface FindingRelations {
+  nodes: FindingRelationNode[];
+  edges: FindingRelationEdge[];
+}
+
+// Review job state. Backend may omit fields before a review has been requested.
+export interface FindingReviewStatus {
+  enabled: boolean;
+  batch_size: number;
+  pending_count: number;
+  running: boolean;
+  error?: string;
+  last_error?: string;
+  report_pending?: number;
+  report_error?: string;
 }
 
 // FindingsPage 是发现列表的服务端分页响应。

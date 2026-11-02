@@ -275,6 +275,29 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)
 	}
+	for _, table := range []string{"finding_relations", "finding_consolidations", "finding_report_rewrites"} {
+		rows, err := decodeArchiveRows(remappedTables[table])
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			// Conversations are independently deletable while the task is archived.
+			if table == "finding_report_rewrites" {
+				row["conversation_id"] = nil
+				if row["status"] == "running" {
+					row["status"] = "failed"
+					row["last_error"] = "归档前报告未完成，请手动重试漏洞检查"
+				}
+			}
+			if table == "finding_consolidations" {
+				row["review_id"] = nil
+			}
+		}
+		raw, _ := json.Marshal(rows)
+		if err := insertArchiveRows(tx, table, raw); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
+	}
 	if streamedLLMRecords != "" {
 		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
 		if err != nil {
@@ -389,6 +412,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
+		"finding_relations": true, "finding_consolidations": true, "finding_report_rewrites": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)

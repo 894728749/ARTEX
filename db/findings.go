@@ -137,6 +137,7 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 		SELECT `+findingSelectCols+`
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
+		WHERE f.merged_into IS NULL
 		ORDER BY f.created_at DESC
 		LIMIT $1`, limit)
 	if err != nil {
@@ -175,7 +176,7 @@ const FindingUnassignedTask = "__unassigned__"
 // positional args. All values are parameterized; Query also escapes ILIKE
 // wildcards so user input is always matched literally.
 func (f FindingFilter) where() (string, []any) {
-	var conds []string
+	conds := []string{"f.merged_into IS NULL"}
 	var args []any
 	add := func(col, val string) {
 		if val == "" {
@@ -484,7 +485,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		q = `SELECT ` + cols + `
 			FROM findings f
 			LEFT JOIN tasks t ON f.task_id = t.id
-			WHERE f.id IN (` + strings.Join(ph, ",") + `)
+			WHERE f.merged_into IS NULL AND f.id IN (` + strings.Join(ph, ",") + `)
 			` + order
 	} else {
 		scoped, err := d.applyAssetScope(f)
@@ -556,11 +557,11 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		COUNT(*) FILTER (WHERE severity = 'high'),
 		COUNT(*) FILTER (WHERE severity = 'medium'),
 		COUNT(*) FILTER (WHERE severity = 'low')
-		FROM findings`).Scan(&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low)
+		FROM findings WHERE merged_into IS NULL`).Scan(&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := d.Query(`SELECT DISTINCT vulnclass FROM findings WHERE vulnclass <> '' ORDER BY vulnclass`)
+	rows, err := d.Query(`SELECT DISTINCT vulnclass FROM findings WHERE merged_into IS NULL AND vulnclass <> '' ORDER BY vulnclass`)
 	if err != nil {
 		return nil, err
 	}
@@ -580,7 +581,7 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	trows, err := d.Query(`SELECT f.task_id, COALESCE(t.name, ''), COALESCE(t.description, ''), COUNT(*)
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
-		WHERE f.task_id IS NOT NULL
+		WHERE f.merged_into IS NULL AND f.task_id IS NOT NULL
 		GROUP BY f.task_id, t.name, t.description
 		ORDER BY MAX(f.created_at) DESC`)
 	if err != nil {
@@ -663,12 +664,30 @@ func (d *DB) DeleteFinding(id int64) (n int64, err error) {
 			}
 			return err
 		}
-		var nodeID sql.NullInt64
-		if err := tx.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID); err != nil {
+		// A canonical finding and its retained sources form one logical finding.
+		// Delete them in one statement so the self-reference cannot strand aliases.
+		rows, err := tx.Query(`DELETE FROM findings WHERE id=$1 OR merged_into=$1 RETURNING node_id`, id)
+		if err != nil {
 			return err
 		}
-		if nodeID.Valid {
-			if _, err := tx.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, nodeID.Int64); err != nil {
+		var nodeIDs []int64
+		for rows.Next() {
+			var nodeID sql.NullInt64
+			if err = rows.Scan(&nodeID); err != nil {
+				rows.Close()
+				return err
+			}
+			if nodeID.Valid {
+				nodeIDs = append(nodeIDs, nodeID.Int64)
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, nodeID := range nodeIDs {
+			if _, err := tx.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND kind='finding'`, nodeID); err != nil {
 				return err
 			}
 		}

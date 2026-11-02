@@ -419,8 +419,13 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	busyKey := s.convBusyKey(c.ID)
 	s.chatMu.Lock()
 	if s.chatBusy[busyKey] {
+		err := s.queueConversationGuidance(c, msg, agentMessage, req.Attachments)
 		s.chatMu.Unlock()
-		writeErr(w, 409, "该会话正在处理上一条消息，请稍候")
+		if err != nil {
+			writeErr(w, 409, err.Error())
+			return
+		}
+		steeringAccepted(w)
 		return
 	}
 	s.chatBusy[busyKey] = true
@@ -489,8 +494,10 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
+	control := agent.NewLiveControl(cancel)
+	s.chatLive.Store(busyKey, chatLiveRun{control: control})
 	s.chatMu.Unlock()
-	return ctx, cancel
+	return agent.WithLiveControl(ctx, control), cancel
 }
 
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
@@ -499,6 +506,9 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
+		if run, ok := s.chatLive.LoadAndDelete(busyKey); ok {
+			run.(chatLiveRun).control.Close()
+		}
 		s.chatMu.Unlock()
 	}()
 	// Only the first turn executes a historical retest. Follow-up conversation

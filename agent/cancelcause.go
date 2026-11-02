@@ -26,6 +26,8 @@ func Causef(code, short, format string, args ...any) *AbortCause {
 }
 
 var (
+	AbortPausedAfterTool = cause("paused_after_tool", "当前工具结束后暂停了任务",
+		"任务已停止规划及领取新工作；正在执行的工具已返回，后续工具与模型轮次不再启动。工具结果与执行历史保留，恢复任务后继续处理未完成意图")
 	// Task-level execution context.
 	AbortPausedByUser = cause("paused_by_user", "用户暂停了任务",
 		"用户通过任务控制接口（POST /api/tasks/{id}/control，action=pause）暂停了任务。本次 Planner/Worker 运行被主动取消；运行中的意图会退回 frontier(open)，恢复任务后重新领取并从头执行")

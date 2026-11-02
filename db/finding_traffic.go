@@ -456,7 +456,7 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (n int64, err error) {
 	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
 		var id int64
-		if err := tx.QueryRow(`SELECT id FROM findings WHERE node_id=$1`, nodeID).Scan(&id); err != nil {
+		if err := tx.QueryRow(`SELECT id FROM findings WHERE node_id=$1 AND merged_into IS NULL`, nodeID).Scan(&id); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -464,6 +464,15 @@ func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, 
 		}
 		if err := LockFindingEvidenceTx(tx, id, version); err != nil {
 			return err
+		}
+		if version == nil {
+			var consolidated bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_consolidations WHERE canonical_id=$1)`, id).Scan(&consolidated); err != nil {
+				return err
+			}
+			if consolidated {
+				return errors.New("该漏洞证据已重新整理，请先读取最新 evidence_version 再提交报告")
+			}
 		}
 		res, err := tx.Exec(`UPDATE findings SET report=$2,report_evidence_version=COALESCE($3::bigint,CASE WHEN evidence_version=0 THEN 0 ELSE -1 END) WHERE id=$1`, id, report, version)
 		if err != nil {

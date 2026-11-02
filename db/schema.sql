@@ -280,20 +280,24 @@ CREATE TABLE IF NOT EXISTS exploration_anchors (
 );
 CREATE INDEX IF NOT EXISTS idx_anchor_asset ON exploration_anchors(asset_id);
 
--- task_constraints: operator-authored operation constraints (allow/deny) for a task.
+-- task_constraints: operator-authored operation constraints (allow/deny/rule) for a task.
 -- Extracted by the goals decomposer at round 0 (from goal/description), editable at
 -- runtime by the main agent + 总览「约束管理」. Injected into the planner/worker system
 -- prompt each round (config-gated) to keep exploration within the operator's boundary.
 CREATE TABLE IF NOT EXISTS task_constraints (
     id             BIGSERIAL PRIMARY KEY,
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
-    kind           TEXT NOT NULL CHECK (kind IN ('allow','deny')),
+    kind           TEXT NOT NULL CHECK (kind IN ('allow','deny','rule')),
     text           TEXT NOT NULL,
     origin         TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_task_constraints_exp ON task_constraints(exploration_id);
+-- Migrate existing installations from allow/deny to allow/deny/rule; safe to rerun.
+ALTER TABLE task_constraints DROP CONSTRAINT IF EXISTS task_constraints_kind_check;
+ALTER TABLE task_constraints ADD CONSTRAINT task_constraints_kind_check
+    CHECK (kind IN ('allow','deny','rule'));
 
 CREATE TABLE IF NOT EXISTS activity (
     id                 BIGSERIAL PRIMARY KEY,
@@ -1384,3 +1388,53 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- Team finding triage: canonical records keep their source evidence for audit.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS merged_into BIGINT REFERENCES findings(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS idx_findings_canonical ON findings(task_id,id) WHERE merged_into IS NULL;
+CREATE TABLE IF NOT EXISTS finding_relations (
+ id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ source_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+ target_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK(kind IN ('prerequisite','enables','supports','contradicts')),
+ rationale TEXT NOT NULL, evidence TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('proposed','verified')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ CHECK(source_id<>target_id), UNIQUE(task_id,source_id,target_id,kind)
+);
+CREATE TABLE IF NOT EXISTS finding_review_state (
+ task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+ enabled BOOLEAN NOT NULL DEFAULT true, batch_size INTEGER NOT NULL DEFAULT 3 CHECK(batch_size BETWEEN 2 AND 20),
+ reviewed_through BIGINT NOT NULL DEFAULT 0, attempted_through BIGINT NOT NULL DEFAULT 0,
+ last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS finding_reviews (
+ id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+ cutoff_id BIGINT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+ summary TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_review_running ON finding_reviews(task_id) WHERE status='running';
+CREATE TABLE IF NOT EXISTS finding_consolidations (
+ id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ review_id BIGINT REFERENCES finding_reviews(id) ON DELETE SET NULL,
+ canonical_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+ source_ids JSONB NOT NULL, reason TEXT NOT NULL, snapshot JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS finding_report_rewrites (
+ id BIGSERIAL PRIMARY KEY, finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+ evidence_version BIGINT NOT NULL, conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed')),
+ last_error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(finding_id,evidence_version)
+);
+-- Existing data is not retroactively sent to a model on upgrade. New findings
+-- and the explicit manual-review action opt into review after this watermark.
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM settings WHERE key='finding_review_watermark_v1') THEN
+  INSERT INTO finding_review_state(task_id,reviewed_through,attempted_through)
+   SELECT t.id,COALESCE(max(f.id),0),COALESCE(max(f.id),0) FROM tasks t LEFT JOIN findings f ON f.task_id=t.id GROUP BY t.id ON CONFLICT DO NOTHING;
+  INSERT INTO settings(key,value) VALUES('finding_review_watermark_v1','true') ON CONFLICT DO NOTHING;
+ END IF;
+END $$;

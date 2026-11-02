@@ -10,11 +10,13 @@ import { toast } from "sonner";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingStatus } from "@/lib/types";
+import type { Finding, FindingReviewStatus, FindingStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type FindingSortField = "time";
@@ -139,6 +141,10 @@ function Row({
 
 export function FindingsTab({ taskId }: { taskId: string }) {
   const [findings, setFindings] = React.useState<Finding[]>([]);
+  const [review, setReview] = React.useState<FindingReviewStatus | null>(null);
+  const [reviewError, setReviewError] = React.useState("");
+  const [reviewBusy, setReviewBusy] = React.useState(false);
+  const [batchSizeDraft, setBatchSizeDraft] = React.useState(3);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     FINDING_SORT_PREFERENCE_KEY,
     FINDING_SORT_FIELDS,
@@ -166,6 +172,55 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     };
   }, [taskId]);
 
+  React.useEffect(() => {
+    let active = true;
+    const load = () =>
+      api
+        .findingReviewStatus(taskId)
+        .then((value) => {
+          if (!active) return;
+          setReview(value);
+          setBatchSizeDraft(value.batch_size || 3);
+          setReviewError(value.last_error ?? value.error ?? "");
+        })
+        .catch(() => {});
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [taskId]);
+
+  const runReview = async () => {
+    if (reviewBusy || review?.running) return;
+    setReviewBusy(true);
+    setReviewError("");
+    try {
+      const result = await api.runFindingReview(taskId);
+      if (!result.accepted) {
+        setReviewError("没有可检查的漏洞，或已有检查正在运行。");
+        return;
+      }
+      toast.success("已提交本任务漏洞归类检查");
+      setReview((current) => (current ? { ...current, running: true } : current));
+    } catch (error) {
+      setReviewError((error as Error).message || "提交检查失败");
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const updateReviewConfig = async (input: { enabled?: boolean; batch_size?: number }) => {
+    try {
+      const updated = await api.updateFindingReviewStatus(taskId, input);
+      setReview(updated);
+      setBatchSizeDraft(updated.batch_size || 3);
+    } catch (error) {
+      setReviewError((error as Error).message || "更新复核设置失败");
+    }
+  };
+
   const onStatus = React.useCallback(async (f: Finding, next: FindingStatus) => {
     if (f.inherited || !f.finding_id || next === f.status) return;
     const prev = f.status;
@@ -188,36 +243,89 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     });
 
   return (
-    <Card className="overflow-hidden py-0">
-      <CardContent className="px-0">
-        <div className="flex items-center border-b px-4 py-2 text-xs text-muted-foreground">
-          <span className="min-w-0 flex-1">漏洞</span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 outline-none focus-visible:underline"
-            aria-label={`发现时间当前${sortPreference.direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`}
-            onClick={() =>
-              setSortPreference((current) => ({
-                field: "time",
-                direction: current.direction === "asc" ? "desc" : "asc",
-              }))
-            }
-          >
-            <span>发现时间</span>
-            {sortPreference.direction === "asc" ? (
-              <ArrowUpIcon className="size-3.5" />
-            ) : (
-              <ArrowDownIcon className="size-3.5" />
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardContent className="flex flex-wrap items-center gap-3 p-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">漏洞归类检查</div>
+            <p className="text-xs text-muted-foreground">
+              {review?.enabled
+                ? `自动检查开启：每新增 ${review.batch_size || 3} 条后台检查一次，当前待检查 ${review.pending_count ?? 0} 条。`
+                : "自动检查已关闭。可手动提交一次任务内漏洞归类检查。"}
+              {review?.running ? " 检查正在运行。" : ""}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              确认为同一具体根因时自动整理为一个漏洞并重写报告，原始证据保留。不同漏洞的前置依赖在“漏洞关联”页展示。
+            </p>
+            {!!review?.report_pending && <p className="mt-1 text-xs text-muted-foreground">{review.report_pending} 份报告正在等待重写或重写中。</p>}
+            {review?.report_error && <p role="alert" className="mt-1 text-xs text-destructive">报告重写未完成：{review.report_error}</p>}
+            {reviewError && (
+              <p role="alert" className="mt-1 text-xs text-destructive">
+                {reviewError}
+              </p>
             )}
-          </button>
-        </div>
-        {items.map((f) => (
-          <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
-        ))}
-        {items.length === 0 && (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">本任务及直接关联任务暂无确认发现。</p>
-        )}
-      </CardContent>
-    </Card>
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={review?.enabled ?? false}
+              disabled={!review}
+              onChange={(event) => void updateReviewConfig({ enabled: event.target.checked })}
+            />
+            自动检查
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            触发条数
+            <Input
+              type="number"
+              min={2}
+              max={20}
+              className="h-8 w-20"
+              value={batchSizeDraft}
+              onChange={(event) => setBatchSizeDraft(Number(event.target.value))}
+              onBlur={() => {
+                const size = Math.max(2, Math.min(20, Math.floor(batchSizeDraft || 3)));
+                setBatchSizeDraft(size);
+                if (size !== review?.batch_size) void updateReviewConfig({ batch_size: size });
+              }}
+            />
+          </label>
+          <Button size="sm" onClick={() => void runReview()} disabled={reviewBusy || !!review?.running}>
+            {reviewBusy || review?.running ? "检查中…" : "立即检查 / 归类"}
+          </Button>
+        </CardContent>
+      </Card>
+      <Card className="overflow-hidden py-0">
+        <CardContent className="px-0">
+          <div className="flex items-center border-b px-4 py-2 text-xs text-muted-foreground">
+            <span className="min-w-0 flex-1">漏洞</span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 outline-none focus-visible:underline"
+              aria-label={`发现时间当前${sortPreference.direction === "asc" ? "正序" : "倒序"}，点击切换排序方向`}
+              onClick={() =>
+                setSortPreference((current) => ({
+                  field: "time",
+                  direction: current.direction === "asc" ? "desc" : "asc",
+                }))
+              }
+            >
+              <span>发现时间</span>
+              {sortPreference.direction === "asc" ? (
+                <ArrowUpIcon className="size-3.5" />
+              ) : (
+                <ArrowDownIcon className="size-3.5" />
+              )}
+            </button>
+          </div>
+          {items.map((f) => (
+            <Row key={f.id} f={f} contextTaskId={taskId} onStatus={onStatus} />
+          ))}
+          {items.length === 0 && (
+            <p className="px-4 py-8 text-center text-sm text-muted-foreground">本任务及直接关联任务暂无确认发现。</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

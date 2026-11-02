@@ -115,12 +115,34 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "node is not an intent")
 		return
 	}
-	if node.State != "paused" {
-		writeErr(w, http.StatusConflict, "仅已暂停的 Worker 可以发送消息，请先暂停")
+	if node.State != "paused" && node.State != "running" {
+		writeErr(w, http.StatusConflict, "仅运行中或已暂停的 Worker 可以发送消息")
 		return
 	}
 	agentMessage, ok := s.prepareChatMentionMessage(w, message)
 	if !ok {
+		return
+	}
+
+	if node.State == "running" {
+		s.engine.workMu.Lock()
+		run := s.engine.work[iid]
+		var queueErr error
+		duplicate := false
+		if run == nil || run.control == nil {
+			queueErr = errors.New("Worker 正在启动或结束，请稍后重发")
+		} else {
+			duplicate, queueErr = run.control.Enqueue(requestID, agentMessage)
+		}
+		s.engine.workMu.Unlock()
+		if queueErr != nil {
+			writeErr(w, 409, queueErr.Error())
+			return
+		}
+		if !duplicate {
+			s.engine.emitActivity(t, db.Activity{NodeID: &iid, Worker: node.Owner, Kind: "user", Summary: message, Detail: message})
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "steering", "accepted": true, "id": iid, "state": "running", "request_id": requestID})
 		return
 	}
 
