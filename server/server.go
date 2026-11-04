@@ -114,6 +114,7 @@ type Server struct {
 	// the persisted current profile at every new LLM call.
 	taskAgentMu sync.Mutex
 	taskAgents  map[string]*taskAgentBundle
+	workflowMu  sync.Mutex
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
@@ -166,6 +167,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	s.engine.SetIntentWorkerResolver(s.workerForIntent)
+	s.engine.SetAgentRunRecorder(s.recordAgentConfiguration)
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -218,11 +221,18 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 			return a.TaskTimeoutWrapupMaxTurns, true
 		}
+		if err := seedReverseRoles(m.pg, m.dir); err != nil {
+			log.Printf("[reverse roles] seed failed: %v", err)
+		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools, m.dir) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
-		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
-		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		wireTools(m.pg, domainReg, m.dir) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
+		seedPrompts(m.pg)                 // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		s.seedOrchestrationTools()        // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		if err := s.seedWorkflowTools(); err != nil {
+			log.Printf("[workflow] seed: %v", err)
+		}
+		go s.workflowRequestLoop()
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
@@ -657,6 +667,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
 	s.reverseRoutes(mux)
+	s.workflowRoutes(mux)
 	s.reverseRuntimeRoutes(mux)
 	s.reverseDebugRoutes(mux)
 
@@ -3769,6 +3780,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		ma = s.agentsForTask(t).main
 	}
 	if ma != nil {
+		s.recordAgentConfiguration(t, agent.WorkflowAgentKey(t.Kind, "mainagent"), 0)
 		// Run the agent on a per-turn cancellable ctx (NOT r.Context()): the turn can
 		// take minutes (multi-tool loop), and binding it to the request lifecycle meant
 		// a page reload / proxy timeout cancelled it mid-run ("context canceled"). The

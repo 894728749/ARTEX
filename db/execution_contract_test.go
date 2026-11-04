@@ -7,12 +7,15 @@ import (
 )
 
 func executionFixture(t *testing.T) (*DB, *Task, *ExplorationStore) {
+	return executionFixtureKind(t, "pentest")
+}
+func executionFixtureKind(t *testing.T, kind string) (*DB, *Task, *ExplorationStore) {
 	t.Helper()
 	d, err := Open(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := d.CreateTask("execution contract", "offline synthetic test", nil, 0, 0)
+	task, err := d.CreateTaskWithOptions("execution contract", "offline synthetic test", TaskCreateOptions{Kind: kind})
 	if err != nil {
 		d.Close()
 		t.Fatal(err)
@@ -56,6 +59,36 @@ func executionAttempt(t *testing.T, s *ExplorationStore, id int64) int64 {
 	}
 	_, attempt := IntentContract(n)
 	return attempt
+}
+
+func TestReverseExecutionSubmittedResultSurvivesSummaryBudget(t *testing.T) {
+	for _, kind := range []string{"pentest", "reverse"} {
+		t.Run(kind, func(t *testing.T) {
+			d, task, s := executionFixtureKind(t, kind)
+			if _, err := d.Exec(`UPDATE tasks SET paused=false WHERE id=$1`, task.ID); err != nil {
+				t.Fatal(err)
+			}
+			id := executionWork(t, s, "bounded accepted work", WorkContract{Acceptance: []string{"observe fixture"}})
+			attempt := executionAttempt(t, s, id)
+			if err := s.SubmitIntentResult(t.Context(), id, attempt, IntentResult{Outcome: "succeeded", Summary: "observed fixture", Evidence: []EvidenceReference{executionEvidence(t, s)}, Satisfied: []string{"observe fixture"}}); err != nil {
+				t.Fatal(err)
+			}
+			state, err := s.FinishIntentAttempt(t.Context(), id, attempt, "exhausted")
+			want := "exhausted"
+			if kind == "reverse" {
+				want = "done"
+			}
+			if err != nil || state != want {
+				t.Fatalf("%s final state=%s want %s: %v", kind, state, want, err)
+			}
+			missing := executionWork(t, s, "missing result", WorkContract{Hypothesis: "no result"})
+			attempt = executionAttempt(t, s, missing)
+			state, err = s.FinishIntentAttempt(t.Context(), missing, attempt, "exhausted")
+			if err != nil || state != "exhausted" {
+				t.Fatalf("unsubmitted result treated as complete: %s %v", state, err)
+			}
+		})
+	}
 }
 
 func TestExecutionContractAdmissionAndDependencies(t *testing.T) {

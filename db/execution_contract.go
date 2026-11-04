@@ -15,14 +15,16 @@ import (
 // WorkContract describes a bounded unit of work. Dependencies mean completed work;
 // evidence references, not a dependency's status alone, establish a factual premise.
 type WorkContract struct {
-	GoalIDs       []int64  `json:"goal_ids,omitempty"`
-	Hypothesis    string   `json:"hypothesis,omitempty"`
-	Acceptance    []string `json:"acceptance,omitempty"`
-	DependsOn     []int64  `json:"depends_on,omitempty"`
-	DirectionKey  string   `json:"direction_key,omitempty"`
-	Novelty       string   `json:"novelty,omitempty"`
-	ResourceKey   string   `json:"resource_key,omitempty"`
-	BudgetSeconds int      `json:"budget_seconds,omitempty"`
+	ExecutionRole     string   `json:"execution_role,omitempty"`
+	WorkflowRequestID int64    `json:"workflow_request_id,omitempty"`
+	GoalIDs           []int64  `json:"goal_ids,omitempty"`
+	Hypothesis        string   `json:"hypothesis,omitempty"`
+	Acceptance        []string `json:"acceptance,omitempty"`
+	DependsOn         []int64  `json:"depends_on,omitempty"`
+	DirectionKey      string   `json:"direction_key,omitempty"`
+	Novelty           string   `json:"novelty,omitempty"`
+	ResourceKey       string   `json:"resource_key,omitempty"`
+	BudgetSeconds     int      `json:"budget_seconds,omitempty"`
 }
 
 type EvidenceReference struct {
@@ -143,6 +145,59 @@ func (s *ExplorationStore) AddWorkIntent(ctx context.Context, summary string, pr
 	if err = s.lockExploration(ctx, tx); err != nil {
 		return 0, err
 	}
+	var kind string
+	if err = tx.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL`, s.expID).Scan(&kind); err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if kind == "reverse" {
+		if c.ExecutionRole == "" {
+			c.ExecutionRole = "reverse_static"
+		}
+		switch c.ExecutionRole {
+		case "reverse_static", "reverse_dynamic", "reverse_reviewer":
+		default:
+			return 0, fmt.Errorf("逆向工作必须指定 reverse_static/reverse_dynamic/reverse_reviewer")
+		}
+	} else if c.ExecutionRole != "" && c.ExecutionRole != "worker" {
+		return 0, fmt.Errorf("渗透工作只能使用 worker")
+	}
+	// Carry ownership through evidence/dependency lineage even when a planner
+	// omits the request ID on a follow-up review. Received results in the source
+	// task are excluded: its independent validation belongs to the source task.
+	inputs, _ := json.Marshal(uniqueWorkIDs(append(append(append([]int64{}, parents...), c.DependsOn...), c.GoalIDs...)))
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT r.id FROM workflow_requests r JOIN tasks task ON task.id=r.target_task_id WHERE task.exploration_id=$1 AND r.id IN (
+ SELECT COALESCE(n.payload->'contract'->>'workflow_request_id',n.payload->>'workflow_request_id','0')::bigint FROM exploration_nodes n WHERE n.exploration_id=$1 AND n.id IN(SELECT value::bigint FROM jsonb_array_elements_text($2::jsonb))
+ UNION SELECT COALESCE(work.payload->'contract'->>'workflow_request_id','0')::bigint FROM exploration_nodes n JOIN exploration_edges e ON (e.src_id=n.id AND e.rel='derived_from') OR (e.dst_id=n.id AND e.rel='yields') JOIN exploration_nodes work ON work.id=CASE WHEN e.src_id=n.id THEN e.dst_id ELSE e.src_id END AND work.kind='intent' AND work.exploration_id=$1 WHERE n.exploration_id=$1 AND n.id IN(SELECT value::bigint FROM jsonb_array_elements_text($2::jsonb)))`, s.expID, string(inputs))
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if c.WorkflowRequestID != 0 && c.WorkflowRequestID != id {
+			rows.Close()
+			return 0, fmt.Errorf("不能混合多个委托的执行归属，请拆成独立工作")
+		}
+		c.WorkflowRequestID = id
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if c.WorkflowRequestID > 0 {
+		var budget int
+		err = tx.QueryRowContext(ctx, `SELECT LEAST(budget_seconds,GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (expires_at-now())))::int)) FROM workflow_requests r JOIN tasks t ON t.id=r.target_task_id WHERE r.id=$1 AND t.exploration_id=$2 AND r.status='pending' AND r.expires_at>now() FOR SHARE OF r`, c.WorkflowRequestID, s.expID).Scan(&budget)
+		if err != nil || budget < 1 {
+			return 0, fmt.Errorf("委托不存在、已结束或不属于本任务")
+		}
+		if c.BudgetSeconds == 0 || c.BudgetSeconds > budget {
+			c.BudgetSeconds = budget
+		}
+	}
 	inputVersions := []EvidenceReference{}
 	for _, id := range parents {
 		n, e := s.evidenceNodeTx(ctx, tx, id)
@@ -151,7 +206,16 @@ func (s *ExplorationStore) AddWorkIntent(ctx context.Context, summary string, pr
 		}
 		inputVersions = append(inputVersions, EvidenceReference{NodeID: id, Version: NodeEvidenceVersion(n)})
 	}
-	keyData, _ := json.Marshal([]any{direction, assets, inputVersions, c.DependsOn, c.GoalIDs, c.Hypothesis})
+	keyParts := []any{direction, assets, inputVersions, c.DependsOn, c.GoalIDs, c.Hypothesis}
+	// Preserve the published pentest deduplication keys; reverse roles represent
+	// different work even when the question and input evidence are identical.
+	if kind == "reverse" {
+		keyParts = append(keyParts, c.ExecutionRole)
+	}
+	if c.WorkflowRequestID > 0 {
+		keyParts = append(keyParts, c.WorkflowRequestID)
+	}
+	keyData, _ := json.Marshal(keyParts)
 	h := sha256.Sum256(keyData)
 	key := hex.EncodeToString(h[:])
 	var existing int64
@@ -303,8 +367,19 @@ func (s *ExplorationStore) FinishIntentAttempt(ctx context.Context, id, attempt 
 	}
 	_ = json.Unmarshal(n.Payload, &p)
 	state, reason := fallback, ""
-	if state == "done" && p.Version > 0 {
-		state = "blocked"
+	var reverse bool
+	if fallback == "exhausted" && p.Version > 0 {
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE exploration_id=$1 AND kind='reverse')`, s.expID).Scan(&reverse); err != nil {
+			return "", err
+		}
+	}
+	// Reverse roles have bounded runs. A valid result submitted before the final
+	// summary hit its turn budget still completed the work; dependencies should
+	// not be stranded by that summary. Pentest settlement keeps its prior policy.
+	if (state == "done" || reverse) && p.Version > 0 {
+		if state == "done" {
+			state = "blocked"
+		}
 		reason = "missing_or_invalid_result"
 		r := p.Result
 		if r.Attempt == attempt && r.Summary != "" {
@@ -344,6 +419,7 @@ func (s *ExplorationStore) FinishIntentAttempt(ctx context.Context, id, attempt 
 					state = "exhausted"
 					reason = ""
 				case "blocked":
+					state = "blocked"
 					reason = "worker_reported_blocker"
 				}
 			}
@@ -410,6 +486,13 @@ func (s *ExplorationStore) ProveGoal(ctx context.Context, goal int64, ref Eviden
 	err = tx.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&all)
 	if err != nil {
 		return false, err
+	}
+	if all {
+		var pending bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_requests r JOIN tasks t ON t.id=r.source_task_id OR t.id=r.target_task_id WHERE t.exploration_id=$1 AND r.status='pending')`, s.expID).Scan(&pending); err != nil {
+			return false, err
+		}
+		all = !pending
 	}
 	return all, tx.Commit()
 }

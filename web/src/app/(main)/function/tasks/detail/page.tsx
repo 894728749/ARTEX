@@ -51,6 +51,7 @@ import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
 import { ReverseTab } from "./_tabs/reverse-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
+import { WorkflowRequestsTab } from "./_tabs/workflow-requests-tab";
 
 const TABS = [
   { value: "sessions", label: "会话" },
@@ -64,6 +65,7 @@ const TABS = [
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
+  { value: "workflow-requests", label: "跨流程协助" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -447,7 +449,10 @@ function TaskDetailInner() {
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
-          <SessionsTab taskId={id} />
+          <SessionsTab taskId={id} taskKind={task.kind ?? "pentest"} />
+        </TabsContent>
+        <TabsContent value="workflow-requests" className="mt-0">
+          <WorkflowRequestsTab taskId={id} taskKind={task.kind === "reverse" ? "reverse" : "pentest"} />
         </TabsContent>
         {task.kind === "reverse" && <TabsContent value="reverse" className="mt-0">
           <ReverseTab taskId={id} paused={paused || task.status === "paused"} onStart={() => void togglePause()} />

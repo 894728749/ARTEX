@@ -27,6 +27,7 @@ type taskAgentBundle struct {
 	pl             *agent.Planner
 	wk             *agent.Worker
 	main           *agent.MainAgent
+	workers        map[string]*agent.Worker
 }
 
 type llmAuditProfile struct {
@@ -122,6 +123,9 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
 	sel := taskLLMSelection{task: t, revision: pt.LLMChainRevision}
+	if t != nil && !r.s.workflowRoleAvailable(t, r.agentKey) {
+		return sel, fmt.Errorf("Agent %s 不存在或已停用", r.agentKey)
+	}
 	if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
@@ -533,6 +537,10 @@ func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 		_, _, unboundReady = s.globalProvider()
 	}
 	for _, key := range agentKeys {
+		key = agent.WorkflowAgentKey(t.Kind, key)
+		if !s.workflowRoleAvailable(t, key) {
+			return false
+		}
 		if _, _, ok := s.agentBindingProvider(key); ok {
 			continue
 		}
@@ -555,23 +563,29 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	if bundle := s.taskAgents[t.ID]; bundle != nil {
 		return bundle
 	}
-	goalRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "goals"}
-	plannerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "planner"}
-	workerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker"}
-	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
+	goalKey, plannerKey, workerKey, mainKey := agent.WorkflowAgentKey(t.Kind, "goals"), agent.WorkflowAgentKey(t.Kind, "planner"), agent.WorkflowAgentKey(t.Kind, "worker"), agent.WorkflowAgentKey(t.Kind, "mainagent")
+	goalRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: goalKey}
+	plannerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: plannerKey}
+	workerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: workerKey}
+	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: mainKey}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	window := workerRuntime.CompactionWindow()
-	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
+	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns(workerKey))
+	wk.SetAgentKey(workerKey)
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
-	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
+	wk.SetRunTimeout(time.Duration(s.agentRunSeconds(workerKey)) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetWebSearch(s.webSearchFor(workerKey))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
-	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns(plannerKey))
+	pl.SetAgentKey(plannerKey)
+	if t.Kind == "reverse" {
+		pl.SetRunTimeout(time.Duration(s.agentRunSeconds(plannerKey)) * time.Second)
+	}
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
@@ -580,24 +594,48 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	pl.SetWebSearch(s.webSearchFor("planner"))
+	pl.SetWebSearch(s.webSearchFor(plannerKey))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
-	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns(mainKey))
+	main.SetAgentKey(mainKey)
+	if t.Kind == "reverse" {
+		main.SetRunTimeout(time.Duration(s.agentRunSeconds(mainKey)) * time.Second)
+	}
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	main.SetWebSearch(s.webSearchFor("mainagent"))
+	main.SetWebSearch(s.webSearchFor(mainKey))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,
+		workers: map[string]*agent.Worker{workerKey: wk},
+	}
+	if t.Kind == "reverse" {
+		for _, key := range []string{"reverse_dynamic", "reverse_reviewer"} {
+			rt := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: key}
+			w := agent.NewWorker(rt, "task-router", s.m.dir, tx, rt.CompactionWindow(), s.agentMaxTurns(key))
+			w.SetAgentKey(key)
+			w.SetFindingRecorder(s.evidenceStore())
+			w.SetCompactionWindowResolver(rt.CompactionWindow)
+			w.SetNonStreaming(rt.nonStreaming)
+			w.SetMaxTokens(rt.maxTokens)
+			w.SetNoaEnabled(s.m.NoaCompactionEnabled)
+			w.SetRunTimeout(time.Duration(s.agentRunSeconds(key)) * time.Second)
+			w.SetConstraintInject(func() bool { return true })
+			bundle.workers[key] = w
+		}
+		// Reverse constraints always apply; a pentest display/configuration toggle
+		// cannot remove the reverse task's scope or runtime policy.
+		wk.SetConstraintInject(func() bool { return true })
+		pl.SetConstraintInject(func() bool { return true })
 	}
 	s.taskAgents[t.ID] = bundle
 	return bundle

@@ -812,6 +812,37 @@ func (s *Server) pgResetTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
+	for _, tool := range s.workflowTools() {
+		if key != tool.Name() && key != reverseToolPrefix+tool.Name() {
+			continue
+		}
+		roles := []string{"planner", "mainagent"}
+		if strings.HasPrefix(key, reverseToolPrefix) {
+			roles = []string{"reverse_planner", "reverse_main"}
+		}
+		schema, _ := json.Marshal(tool.InputSchema())
+		bindings, _ := json.Marshal(roles)
+		if err := pg.UpsertToolForce(key, tool.Description(), schema, bindings); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	if strings.HasPrefix(key, reverseToolPrefix) {
+		for _, sd := range reverseToolDefaults(pg, s.m.dir) {
+			if sd.Key == key {
+				schema, _ := json.Marshal(sd.Schema)
+				binds, _ := json.Marshal(sd.Agents)
+				if err := pg.UpsertToolForce(key, sd.Desc, schema, binds); err != nil {
+					writeErr(w, 500, err.Error())
+					return
+				}
+				writeJSON(w, 200, map[string]bool{"ok": true})
+				return
+			}
+		}
+	}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if sd.Key != key {
 			continue

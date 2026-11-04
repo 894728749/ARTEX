@@ -1499,6 +1499,36 @@ CREATE TABLE IF NOT EXISTS reverse_runtime_runs (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_reverse_runtime_runs_task ON reverse_runtime_runs(task_id,id DESC);
+
+-- Narrow, durable handoff records between opposite workflow task kinds.
+CREATE TABLE IF NOT EXISTS workflow_requests (
+ id BIGSERIAL PRIMARY KEY,
+ request_key TEXT NOT NULL CHECK(length(request_key) BETWEEN 1 AND 160),
+ source_task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ target_task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ source_intent_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+ target_intent_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+ question TEXT NOT NULL CHECK(length(question) BETWEEN 1 AND 4000),
+ acceptance JSONB NOT NULL CHECK(jsonb_typeof(acceptance)='array'),
+ input_snapshot JSONB NOT NULL CHECK(jsonb_typeof(input_snapshot) IN ('object','array')),
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','completed','cancelled','expired')),
+ result JSONB,
+ budget_seconds INTEGER NOT NULL CHECK(budget_seconds BETWEEN 1 AND 3600),
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+ parent_request_id BIGINT REFERENCES workflow_requests(id) ON DELETE SET NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(source_task_id,request_key),
+ CHECK(source_task_id<>target_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_requests_source ON workflow_requests(source_task_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_requests_target ON workflow_requests(target_task_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_requests_pending_expiry ON workflow_requests(expires_at) WHERE status='pending';
+DROP TRIGGER IF EXISTS trg_workflow_requests_upd ON workflow_requests;
+CREATE TRIGGER trg_workflow_requests_upd BEFORE UPDATE ON workflow_requests
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 -- Existing data is not retroactively sent to a model on upgrade. New findings
 -- and the explicit manual-review action opt into review after this watermark.
 DO $$ BEGIN

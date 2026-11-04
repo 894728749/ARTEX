@@ -64,6 +64,7 @@ import type {
   Session,
   SessionStatus,
   SessionTokenUsage,
+  TaskKind,
   TaskLLMResolution,
   TaskLLMResolutions,
   TaskNode,
@@ -479,7 +480,7 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; taskKind?: TaskKind }) {
   const approvalFocus = useApprovalFocus({ taskId });
   const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
   const focusSession = React.useMemo<Session | undefined>(() => {
@@ -1661,8 +1662,42 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const sendMode = useChatSendMode();
   // What the transcript pane should show for the active session.
   const showLoader = !activeState || (activeState.loading && !activeState.loaded);
+  const reverseAgentKeyForSession = (session: Session): string | undefined => {
+    const items = store[keyForSession(session)]?.items ?? [];
+    const activityKey = [...items].reverse().find((item) => item.metadata?.agent_config?.key)?.metadata?.agent_config?.key;
+    if (session.role === "mainagent") return "reverse_main";
+    if (session.role === "planner") {
+      if (activityKey === "reverse_goals" || activityKey === "goals") return activityKey;
+      return "reverse_planner";
+    }
+    if (session.role !== "worker") return undefined;
+    const node = sessionMeta.get(session.id)?.json;
+    if (node && typeof node === "object") {
+      const payload = (node as { payload?: unknown }).payload;
+      if (payload && typeof payload === "object") {
+        const contract = (payload as { contract?: { execution_role?: unknown } }).contract;
+        if (typeof contract?.execution_role === "string" && ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(contract.execution_role)) {
+          return contract.execution_role;
+        }
+      }
+    }
+    if (activityKey && ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(activityKey)) return activityKey;
+    return undefined;
+  };
   const resolutionForSession = (session: Session): TaskLLMResolution | undefined => {
     if (!llmResolutions || session.inherited || session.role === "system") return undefined;
+    if (taskKind === "reverse") {
+      const key = reverseAgentKeyForSession(session);
+      if (key === "reverse_goals" || key === "goals") return llmResolutions.reverse_goals ?? llmResolutions.goals;
+      if (key === "reverse_main") return llmResolutions.reverse_main;
+      if (key === "reverse_planner") return llmResolutions.reverse_planner;
+      if (key === "reverse_static") return llmResolutions.reverse_static ?? llmResolutions.worker;
+      if (key === "reverse_dynamic") return llmResolutions.reverse_dynamic;
+      if (key === "reverse_reviewer") return llmResolutions.reverse_reviewer;
+      // A reverse worker without an explicit execution role or per-run agent key
+      // must not inherit the static worker's model label.
+      return undefined;
+    }
     if (session.role === "mainagent") return llmResolutions.mainagent;
     if (session.role === "planner") return llmResolutions.planner;
     return llmResolutions.worker;

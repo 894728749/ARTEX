@@ -28,16 +28,19 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		workDir = workDirs[0]
 	}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+		var reverseExtra []actool.CoreTool
+		reverseCleanup := func() {}
 		if info := agent.RunInfoFrom(ctx); info.TaskID > 0 {
 			if task, err := pg.GetTask(info.TaskID); err == nil && task != nil && task.Kind == "reverse" {
-				return reverseAgentTools(ctx, pg, task, workDir, agentKey)
+				reverseExtra, _, reverseCleanup = reverseAgentTools(ctx, pg, task, workDir, agentKey)
 			}
 		}
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
+			reverseCleanup()
 			return nil, agent.DeferredInfo{}, nil
 		}
-		var extra []actool.CoreTool
+		extra := reverseExtra
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
@@ -174,6 +177,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		}
 
 		cleanup := func() {
+			reverseCleanup()
 			for _, c := range closers {
 				_ = c.Close()
 			}
@@ -218,7 +222,11 @@ func seedPrompts(pg *db.DB) {
 // tool-assembly time each built-in tool is filtered by its agent binding / enabled
 // flag and, if kept, wrapped so the model sees the DB-overridden description/schema
 // and缺省入参 get injected. MCP/skill/host tools have no row and pass through.
-func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
+func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, workDirs ...string) {
+	workDir := ""
+	if len(workDirs) > 0 {
+		workDir = workDirs[0]
+	}
 	agent.FindingTrafficBindingEnabled = func() bool { return pg.GetBool(settingAgentTrafficBinding, false) }
 	// Seed the built-in domain tools (first-insert only; DO NOTHING preserves edits).
 	// No startup prune: rows we didn't seed are left alone so future user-defined
@@ -267,8 +275,12 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).
 	const bashInteractiveShellNote = "\n\n需要【交互输入】的程序（msfconsole / ssh 交互登录 / mysql、psql、python 等 REPL / 密码或 yes/no 提示 / nc 反弹 shell）不要用 Bash（它没有 stdin、会卡住），改用 shell_open 开交互会话（用完 shell_close）。一次性、非交互命令仍用 Bash。"
 	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
+		reverse := strings.HasPrefix(agentKey, "reverse_")
 		rows, err := pg.ListTools()
 		if err != nil {
+			if reverse {
+				return nil
+			} // A failed config read cannot broaden reverse permissions.
 			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
 			return tools
 		}
@@ -282,12 +294,26 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			if len(row.Schema) > 0 {
 				_ = json.Unmarshal(row.Schema, &schema)
 			}
-			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
+			resolved := agent.DecorateTool(t, row.Description, schema)
+			if reverse && (t.Name() == "Read" || t.Name() == "LS" || t.Name() == "Glob" || t.Name() == "Grep") {
+				resolved = &reverseFileTool{CoreTool: resolved, workDir: workDir, taskID: runInfo.TaskID}
+			}
+			return meterTool(resolved, pg, row.Key, agentKey, runInfo)
 		}
 		out := tools[:0:0]
 		for _, t := range tools {
-			row, known := byKey[t.Name()]
+			if !permittedReverseRoleTool(agentKey, t.Name()) {
+				continue
+			}
+			key := t.Name()
+			if reverse {
+				key = reverseToolPrefix + key
+			}
+			row, known := byKey[key]
 			if !known { // MCP/skill/host tool: no row → untouched
+				if reverse && t.Name() != "Skill" && !strings.HasPrefix(t.Name(), "mcp__") {
+					continue
+				}
 				out = append(out, t)
 				continue
 			}
@@ -307,10 +333,17 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				inList[t.Name()] = true
 			}
 			for _, row := range rows {
-				if row.Kind == "shell" || !row.Enabled || !contains(row.Agents, agentKey) || inList[row.Key] {
+				key := row.Key
+				if reverse {
+					if !strings.HasPrefix(key, reverseToolPrefix) {
+						continue
+					}
+					key = strings.TrimPrefix(key, reverseToolPrefix)
+				}
+				if row.Kind == "shell" || !row.Enabled || !contains(row.Agents, agentKey) || inList[key] || !permittedReverseRoleTool(agentKey, key) {
 					continue
 				}
-				inst, ok := domainReg[row.Key]
+				inst, ok := domainReg[key]
 				if !ok {
 					continue // not a domain tool; custom/host tools are injected via hostTools()
 				}

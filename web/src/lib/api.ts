@@ -108,6 +108,8 @@ import type {
   TrafficDetail,
   TrafficEvidenceRef,
   TrafficEvidenceRole,
+  WorkflowRequest,
+  WorkflowRequestCreateInput,
   TrafficHost,
   TrafficResp,
   UpdateCheck,
@@ -299,6 +301,11 @@ export const api = {
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
   reverseArtifacts: (taskId: string) => get<ReverseArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/reverse/artifacts`).then(arr),
+  workflowRequests: (taskId: string) => get<WorkflowRequest[]>(`/tasks/${encodeURIComponent(taskId)}/workflow-requests`).then(arr),
+  createWorkflowRequest: (taskId: string, input: WorkflowRequestCreateInput) =>
+    post<WorkflowRequest>(`/tasks/${encodeURIComponent(taskId)}/workflow-requests`, input),
+  cancelWorkflowRequest: (taskId: string, requestId: number) =>
+    post<{ ok: boolean }>(`/tasks/${encodeURIComponent(taskId)}/workflow-requests/${requestId}/cancel`, {}),
   uploadReverseArtifact: async (taskId: string, file: File, source: string, version: string) => {
     if (MOCK) return { id: Date.now(), task_id: Number(taskId), name: file.name, format: file.name.split(".").pop() ?? "", size_bytes: file.size, sha256: "", source, version, created_at: new Date().toISOString() } as ReverseArtifact;
     const fd = new FormData(); fd.append("file", file); fd.append("source", source); fd.append("version", version);

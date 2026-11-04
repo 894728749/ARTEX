@@ -15,6 +15,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // Opt-in real-engine acceptance. Supply synthetic artifacts and private runner
@@ -121,10 +122,21 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			info := agent.RunInfo{TaskID: id, IntentID: analyst}
-			runCtx := agent.WithRunInfo(context.Background(), info)
+			runCtx := agent.WithWorkflow(agent.WithRunInfo(context.Background(), info), "reverse")
+			role := "reverse_static"
+			if c.Profile != "" {
+				role = "reverse_dynamic"
+			}
+			base := agent.NewToolSet(store, "acceptance").WorkerTools()
+			base = append(base, actool.DefaultTools()...)
+			roleTools, _, cleanup := agent.AugmentTools(runCtx, role, base)
+			defer cleanup()
+			if names(roleTools)["reverse_review_conclusion"] != nil {
+				t.Fatal("analyst received reviewer write tool")
+			}
 			resultPath := ""
 			if c.Profile != "" {
-				tool := reverseDebugTool(m.pg, task, info, m.dir)
+				tool := workflowTool(t, roleTools, "reverse_observe_runtime")
 				args := map[string]any{"artifact_id": artifact.ID, "profile_id": c.Profile, "script": c.Script, "package_name": c.Package, "duration_ms": c.Duration}
 				workflowCall(t, runCtx, tool, args, true) // Explicit default-deny proof.
 				policy, _ := json.Marshal(db.ReverseRuntimePolicy{Enabled: true, ProfileIDs: []string{c.Profile}, ArtifactIDs: []int64{artifact.ID}, MaxDurationMS: c.Duration})
@@ -149,8 +161,7 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 					t.Fatalf("run history: %+v %v", runs, err)
 				}
 			} else {
-				tools, _, close := reverseAgentTools(runCtx, m.pg, task, m.dir, "worker")
-				defer close()
+				tools := roleTools
 				answer := workflowCall(t, runCtx, workflowTool(t, tools, "rea_analyze_artifact"), map[string]any{"artifact_id": artifact.ID}, false)
 				var result struct {
 					Path string `json:"result_path"`
@@ -182,19 +193,24 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 			if c.Expected == "" || !strings.Contains(string(evidence), c.Expected) {
 				t.Fatalf("actual evidence lacks %q", c.Expected)
 			}
-			analysisTools := reverseConclusionTools(m.pg, task, info, m.dir)
+			analysisTools := roleTools
 			answer := workflowCall(t, runCtx, workflowTool(t, analysisTools, "reverse_submit_conclusion"), map[string]any{"question": "What did the controlled fixture demonstrate?", "answer": c.Expected, "evidence": []db.ReverseEvidence{{ArtifactID: artifact.ID, Locator: c.Name, Observation: "Verified in the saved raw engine result: " + c.Expected, ResultPath: resultPath}}, "limitations": "Only this synthetic sample, engine configuration and observation window; no general program-completeness claim."}, false)
 			var submitted struct{ Conclusion db.ReverseConclusion }
 			if err = json.Unmarshal([]byte(answer), &submitted); err != nil {
 				t.Fatal(err)
 			}
-			reviewTools := reverseConclusionTools(m.pg, task, agent.RunInfo{TaskID: id, IntentID: reviewer}, m.dir)
-			workflowCall(t, runCtx, workflowTool(t, reviewTools, "reverse_review_conclusion"), map[string]any{"conclusion_id": submitted.Conclusion.ID, "state": "accepted", "review": "Independent test intent re-read the persisted raw result, matched the expected synthetic behavior and checked the artifact digest."}, false)
+			reviewCtx := agent.WithWorkflow(agent.WithRunInfo(context.Background(), agent.RunInfo{TaskID: id, IntentID: reviewer}), "reverse")
+			reviewTools, _, closeReview := agent.AugmentTools(reviewCtx, "reverse_reviewer", base)
+			defer closeReview()
+			if names(reviewTools)["reverse_submit_conclusion"] != nil {
+				t.Fatal("reviewer received analyst write tool")
+			}
+			workflowCall(t, reviewCtx, workflowTool(t, reviewTools, "reverse_review_conclusion"), map[string]any{"conclusion_id": submitted.Conclusion.ID, "state": "accepted", "review": "Independent test intent re-read the persisted raw result, matched the expected synthetic behavior and checked the artifact digest."}, false)
 			report := request("GET", fmt.Sprintf("/api/tasks/%d/reverse/report", id), nil, "")
 			if report.Code != 200 || !strings.Contains(report.Body.String(), artifact.SHA256) || !strings.Contains(report.Body.String(), "已核验接受") {
 				t.Fatal("report lacks reviewed evidence")
 			}
-			summaries = append(summaries, map[string]any{"case": c.Name, "artifact_sha256": artifact.SHA256, "result_path": resultPath, "bytes": len(evidence), "independent_review": "accepted", "report": true})
+			summaries = append(summaries, map[string]any{"case": c.Name, "artifact_sha256": artifact.SHA256, "result_path": resultPath, "bytes": len(evidence), "analysis_role": role, "review_role": "reverse_reviewer", "independent_review": "accepted", "report": true})
 		})
 	}
 	summary, _ := json.MarshalIndent(summaries, "", "  ")

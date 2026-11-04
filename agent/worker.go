@@ -55,6 +55,7 @@ type Worker struct {
 	findingRecorder FindingRecorder
 	prov            llm.Provider
 	model           string
+	agentKey        string
 	workDir         string
 	proxyAddr       string
 	proxyCACert     string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
@@ -115,6 +116,9 @@ func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
 // model path (true = non-streaming). nil/unset = streaming (default). Read per
 // run so a profile or task-chain toggle takes effect without rebuilding.
 func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
+
+// SetAgentKey selects the isolated prompt/tool/settlement namespace.
+func (w *Worker) SetAgentKey(key string) { w.agentKey = key }
 
 func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
 
@@ -359,6 +363,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 }
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	agentKey := effectiveAgentKey(w.agentKey, workflowKind(ctx), "worker")
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
@@ -380,7 +385,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
-	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
@@ -397,7 +402,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if IsReverse(ctx) {
-		sysBody = reverseSystem("worker", "完成当前工作单，服务任务原问题", runDir)
+		sysBody = reverseSystemKey(agentKey, "worker", "完成当前工作单，服务任务原问题", runDir)
 	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := w.wantConstraints()
@@ -443,9 +448,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		budget = time.Duration(seconds) * time.Second
 	}
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, budget)
-	settle := wrapupSettlement("worker", []string{"Bash"})
+	settle := wrapupSettlement(agentKey, []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
+		settle = wrapupSettlementForTask(agentKey, []string{"Bash"}, clamped)
 	}
 	opts := agentcore.Options{
 		Provider:        w.prov,
@@ -494,12 +499,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if IsReverse(ctx) {
 		opts.EnableWebFetch, opts.EnableWebSearch = false, false
-		if opts.MaxTurns == 0 || opts.MaxTurns > 16 {
-			opts.MaxTurns = 16
-		}
-		if opts.MaxDuration == 0 || opts.MaxDuration > 12*time.Minute {
-			opts.MaxDuration = 12 * time.Minute
-		}
 	}
 	if refreshConstraints {
 		installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })

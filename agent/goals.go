@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
@@ -109,6 +110,12 @@ func DecomposeGoals(ctx context.Context, prov llm.Provider, dataDir, goalText, d
 // letting the caller own provider selection/failover. maxTokens is the profile's
 // per-reply output cap (0 = send none).
 func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, emit func(db.Activity)) []GoalSpec {
+	return DecomposeGoalsWithProviderConfig(ctx, prov, dataDir, goalText, desc, as, ts, taskID, nonStreaming, maxTokens, emit, WorkflowAgentKey(workflowKind(ctx), "goals"), 8, 0)
+}
+
+// DecomposeGoalsWithProviderConfig is the configurable runtime variant. The legacy
+// API remains source-compatible and retains its eight-turn default.
+func DecomposeGoalsWithProviderConfig(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, emit func(db.Activity), agentKey string, maxTurns int, runTimeout time.Duration) []GoalSpec {
 	if prov == nil {
 		return nil
 	}
@@ -128,9 +135,9 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
-	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
+	sys := renderSystem(agentKey, goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
 	if IsReverse(ctx) {
-		sys = reverseSystem("goals", goalText, ensureRunDir(dataDir, taskID, 0))
+		sys = reverseSystemKey(agentKey, "goals", goalText, ensureRunDir(dataDir, taskID, 0))
 	}
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
@@ -154,17 +161,37 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 			emit(r)
 		}
 	}
-	captureRun(ctx, agentcore.Options{
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	def := DeferredInfo{}
+	cleanup := func() {}
+	if IsReverse(ctx) {
+		tools, def, cleanup = AugmentTools(ctx, agentKey, tools)
+	}
+	defer cleanup()
+	if maxTurns <= 0 && !IsReverse(ctx) {
+		maxTurns = 8
+	}
+	maxDuration, _ := clampMaxDuration(taskClockFrom(ctx).DeadlineUnix, runTimeout)
+	system, boundary := deferredSystem(sys, def)
+	opts := agentcore.Options{
 		Provider:               prov,
-		SystemPrompt:           []string{sys},
+		SystemPrompt:           system,
+		DynamicBoundary:        boundary,
 		Tools:                  tools,
+		DeferredTools:          def.Deferred,
+		UnlockSet:              def.Unlock,
 		PermissionMode:         acperm.ModeBypass,
 		DisableBackgroundTasks: true,
 		// 3 步(抽约束 → 登记范围 → 拆目标)各需一次工具调用,给足回合避免收尾前漏调 set_goals。
-		MaxTurns:     8,
+		MaxTurns:     maxTurns,
+		MaxDuration:  maxDuration,
 		NonStreaming: nonStreaming, // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    maxTokens,    // 0 = 不发上限,由服务端默认值决定
-	}, userMsg, captureEmit)
+	}
+	if IsReverse(ctx) {
+		opts.Settlement = wrapupSettlement(agentKey, nil)
+	}
+	captureRun(ctx, opts, userMsg, captureEmit)
 	// set_goals persisted the goals directly; read them back so the caller sees what
 	// was written (empty slice ⇒ the LLM produced nothing ⇒ caller falls back).
 	if ts == nil {

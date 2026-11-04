@@ -189,6 +189,12 @@ func intp(v int) *int { return &v }
 // 注：planner/worker/mainagent/auto 的交互式 shell 默认由下方 interactive_shell_default_v1
 // 块统一置 true（尊重后续 toggle）；这里的 interactiveShell 只给需要「建行即默认开」的新 agent。
 var builtinAgents = []builtinAgent{
+	{"reverse_main", "逆向主 Agent", "main", "逆向任务的人机接口、材料与范围管理。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(600)},
+	{"reverse_goals", "逆向目标拆解", "goals", "把软件分析问题拆成有证据标准的目标。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(300)},
+	{"reverse_planner", "逆向规划", "planner", "按需调度静态、动态和独立核验，处理定向委托。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(600)},
+	{"reverse_static", "逆向静态分析", "worker", "分析选定材料，保存候选解释与证据。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(720)},
+	{"reverse_dynamic", "逆向动态分析", "worker", "在已授权的 Windows、Linux、Android 环境观察运行行为。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(720)},
+	{"reverse_reviewer", "逆向独立核验", "worker", "独立读取原始材料和证据，接受、拒绝或保留未决结论。", []promptVar{{"Goal", "逆向任务原问题", "解释选定程序行为", "exploration"}, {"WorkDir", "会话工作目录", "tasks/1", "runtime"}}, false, intp(720)},
 	{"goals", "目标拆解", "goals", "把渗透任务目标拆解成若干独立、可验证的子目标。", []promptVar{
 		{"EngagementDescription", "任务描述（测试对象/背景）", "测试 example.com 站点", "exploration"},
 		// Now 是全局 runtime 变量(见 server.globalPromptVars),不再在各 agent 目录里
@@ -217,11 +223,20 @@ var builtinAgents = []builtinAgent{
 func (d *DB) seedBuiltins() error {
 	for _, a := range builtinAgents {
 		var agentID int64
+		turns := 0
+		switch a.key {
+		case "reverse_goals":
+			turns = 8
+		case "reverse_main", "reverse_planner":
+			turns = 12
+		case "reverse_static", "reverse_dynamic", "reverse_reviewer":
+			turns = 16
+		}
 		err := d.QueryRow(`
-INSERT INTO agents(key, name, description, role, builtin, enabled, interactive_shell, run_seconds)
-VALUES ($1, $2, NULLIF($3,''), $4, true, true, $5, COALESCE($6, 1200))
+INSERT INTO agents(key, name, description, role, builtin, enabled, interactive_shell, run_seconds,max_turns)
+VALUES ($1, $2, NULLIF($3,''), $4, true, true, $5, COALESCE($6, 1200),$7)
 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description
-RETURNING id`, a.key, a.name, a.desc, a.role, a.interactiveShell, a.runSeconds).Scan(&agentID)
+RETURNING id`, a.key, a.name, a.desc, a.role, a.interactiveShell, a.runSeconds, turns).Scan(&agentID)
 		if err != nil {
 			return fmt.Errorf("agent %s: %w", a.key, err)
 		}

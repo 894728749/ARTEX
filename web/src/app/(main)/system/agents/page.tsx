@@ -68,6 +68,11 @@ function AgentGridCard({
           <Bot className="text-muted-foreground size-4" />
           <span className="text-sm font-medium">{agent.name}</span>
           <span className="text-muted-foreground font-mono text-xs">{agent.key}</span>
+          {agent.key.startsWith("reverse_") && (
+            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+              逆向
+            </Badge>
+          )}
           {agent.builtin ? (
             <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
               内置

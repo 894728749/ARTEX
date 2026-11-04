@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"github.com/Autumn-27/artex/agent"
 	"net/http"
 
 	"github.com/Autumn-27/artex/db"
@@ -45,12 +46,16 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 // role Agent binding -> explicit task chain -> active/global environment config.
 // Database failures are returned rather than represented as an unavailable model.
 func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution, error) {
+	agentKey = agent.WorkflowAgentKey(t.Kind, agentKey)
 	if s == nil || s.m == nil || s.m.pg == nil {
 		return taskLLMResolution{}, fmt.Errorf("database unavailable")
 	}
 	a, err := s.m.pg.GetAgentByKey(agentKey)
 	if err != nil {
 		return taskLLMResolution{}, fmt.Errorf("load agent %q: %w", agentKey, err)
+	}
+	if t.Kind == "reverse" && (a == nil || !a.Enabled) {
+		return taskLLMResolution{Source: "agent", Reason: agentKey + " 不存在或已停用"}, nil
 	}
 	if a != nil && a.LLMProfileID != nil {
 		p, err := s.m.pg.ProfileByID(*a.LLMProfileID)
@@ -107,11 +112,21 @@ func (s *Server) taskLLMResolutionHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	roles := map[string]taskLLMResolution{}
-	for responseKey, agentKey := range map[string]string{
+	keys := map[string]string{
 		"mainagent": "mainagent",
 		"planner":   "planner",
 		"worker":    "worker",
-	} {
+	}
+	if t.Kind == "reverse" {
+		keys["reverse_static"] = "reverse_static"
+		keys["reverse_dynamic"] = "reverse_dynamic"
+		keys["reverse_reviewer"] = "reverse_reviewer"
+		keys["goals"] = "reverse_goals"
+		keys["reverse_main"] = "reverse_main"
+		keys["reverse_planner"] = "reverse_planner"
+		keys["reverse_goals"] = "reverse_goals"
+	}
+	for responseKey, agentKey := range keys {
 		resolved, err := s.resolveTaskRoleLLM(t, agentKey)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())

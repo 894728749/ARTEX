@@ -12,6 +12,10 @@ import (
 // claimableSQL is shared by direct claims and frontier selection. Missing,
 // deleted or unsuccessful predecessors never silently satisfy a dependency.
 const claimableSQL = `n.kind='intent' AND n.state IN ('open','waiting')
+ AND NOT (n.payload ? 'workflow_wait_id')
+ AND (COALESCE(n.payload->'contract'->>'workflow_request_id','0')='0' OR EXISTS(
+ SELECT 1 FROM workflow_requests wr JOIN tasks wt ON wt.id=wr.target_task_id
+ WHERE wr.id=(n.payload->'contract'->>'workflow_request_id')::bigint AND wt.exploration_id=n.exploration_id AND wr.status='pending' AND wr.expires_at>now()))
  AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(COALESCE(n.payload->'contract'->'depends_on','[]'::jsonb)) dep
  LEFT JOIN exploration_nodes p ON p.id=dep.value::bigint AND p.exploration_id=n.exploration_id AND p.kind='intent'
  WHERE p.id IS NULL OR p.state<>'done')

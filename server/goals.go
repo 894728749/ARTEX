@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -79,6 +80,11 @@ func (s *Server) occupiesConcurrencySlot(t *Task) bool {
 	// persisted running task is restored.
 	if s.engine.IsDeleting(t.ID) {
 		return true
+	}
+	// Waiting for a delegation does not reserve a task slot. Its intent cannot be
+	// claimed; unrelated ready/running work in the same task still holds the slot.
+	if s.onlyWaitingForWorkflow(t) && s.engine.ActiveLLMCalls(t.ID) == 0 {
+		return false
 	}
 	return !s.engine.IsPaused(t.ID) && (s.engine.ReadyFor(t) || s.engine.ActiveLLMCalls(t.ID) > 0)
 }
@@ -227,7 +233,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 	for _, task := range s.m.List() {
 		lifecycle := task.lifecycleSnapshot()
-		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
+		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !s.onlyWaitingForWorkflow(task) && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
 			return true
 		}
 	}
@@ -264,6 +270,22 @@ func (s *Server) reconcileConcurrency() {
 	s.concMu.Lock()
 	defer s.concMu.Unlock()
 	enabled, limit := s.m.ConcurrencyLimit()
+	// Park waiters only after their current model/tool boundary. They re-enter
+	// through the normal FIFO admission when the result arrives, so waking a
+	// parent cannot exceed the running-task limit.
+	if enabled {
+		for _, task := range s.m.List() {
+			state := task.lifecycleSnapshot()
+			if state.Paused || state.Queued || isTerminalStatus(state.Status) || s.engine.IsDeleting(task.ID) || s.engine.ActiveLLMCalls(task.ID) > 0 || !s.onlyWaitingForWorkflow(task) {
+				continue
+			}
+			s.engine.Pause(task.ID, agent.Causef("workflow_wait_queued", "等待跨流程协助", "请求完成后按队列顺序继续"))
+			if err := s.m.EnqueueTask(task.ID, "resume"); err != nil {
+				s.engine.Resume(task)
+				log.Printf("[workflow] queue waiter %s: %v", task.ID, err)
+			}
+		}
+	}
 
 	// A task whose provider chain becomes unavailable cannot do useful work and
 	// must not reserve a limited running slot forever. Park it persistently so a
@@ -333,7 +355,7 @@ func (s *Server) reconcileConcurrency() {
 		// Keep FIFO order, but do not consume a concurrency slot for a task
 		// whose explicit chain/global provider is unavailable. It will be retried
 		// after the user configures or resets its LLM chain.
-		if lifecycle.Paused || (enabled && !s.engine.ReadyFor(task)) {
+		if lifecycle.Paused || s.onlyWaitingForWorkflow(task) || (enabled && !s.engine.ReadyFor(task)) {
 			continue
 		}
 		mode := lifecycle.QueueMode
@@ -394,7 +416,13 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)
 	goalRuntime := s.agentsForTask(t).runtime
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	s.recordAgentConfiguration(t, goalRuntime.agentKey, 0)
+	var decomposed []agent.GoalSpec
+	if t.Kind == "reverse" {
+		decomposed = agent.DecomposeGoalsWithProviderConfig(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit, goalRuntime.agentKey, s.agentMaxTurns(goalRuntime.agentKey), time.Duration(s.agentRunSeconds(goalRuntime.agentKey))*time.Second)
+	} else {
+		decomposed = agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	}
 	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {

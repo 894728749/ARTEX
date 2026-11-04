@@ -32,6 +32,13 @@ func (d *DB) AdvanceGoalFinalization(ctx context.Context, taskID int64, begin bo
 	if paused || IsTerminal(status) {
 		return status, nil
 	}
+	var pending bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, taskID).Scan(&pending); err != nil {
+		return "", err
+	}
+	if pending {
+		return status, nil
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,payload->'proof' FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal' AND state='met' AND payload ? 'proof' ORDER BY id FOR UPDATE`, exp)
 	if err != nil {
 		return "", err

@@ -388,7 +388,12 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		}
 		return reverseJSON(out), nil
 	})}
-	if role == "worker" {
+	if role == "worker" || role == "reverse_static" || role == "reverse_dynamic" || role == "reverse_reviewer" {
+		for _, tool := range actool.DefaultTools() {
+			if tool.Name() == "Glob" || tool.Name() == "Grep" {
+				tools = append(tools, tool)
+			}
+		}
 		tools = append(tools, reverseEvidenceViewTool(task.ID, workDir))
 		tools = append(tools, reverseTool("rea_catalog", "查询此工作单独立 REA 会话的真实工具名称和输入 schema；query 用工具名/关键词，limit 最大 10。目录存在不代表外部引擎可用。", reverseObject(map[string]any{"query": reverseString(), "offset": reverseInt(), "limit": reverseInt()}), func(callCtx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -468,5 +473,11 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		tools = append(tools, reverseConclusionTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseDebugTool(pg, task, info, workDir))
 	}
-	return tools, agent.DeferredInfo{}, cleanup
+	permitted := tools[:0]
+	for _, t := range tools {
+		if permittedReverseRoleTool(role, t.Name()) {
+			permitted = append(permitted, t)
+		}
+	}
+	return permitted, agent.DeferredInfo{}, cleanup
 }

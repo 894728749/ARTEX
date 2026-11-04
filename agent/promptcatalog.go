@@ -118,11 +118,17 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 // source while the same string stays as the in-code render fallback.
 func BuiltinPromptSeeds() map[string]string {
 	return map[string]string{
-		"goals":     goalsDefaultTmpl,
-		"planner":   plannerDefaultTmpl,
-		"mainagent": mainAgentDefaultTmpl,
-		"worker":    workerDefaultTmpl,
-		"auto":      autoDefaultTmpl,
-		"pentest":   pentestDefaultTmpl,
+		"goals":            goalsDefaultTmpl,
+		"planner":          plannerDefaultTmpl,
+		"mainagent":        mainAgentDefaultTmpl,
+		"worker":           workerDefaultTmpl,
+		"auto":             autoDefaultTmpl,
+		"pentest":          pentestDefaultTmpl,
+		"reverse_main":     reverseMainDefaultTmpl,
+		"reverse_goals":    reverseGoalsDefaultTmpl,
+		"reverse_planner":  reversePlannerDefaultTmpl,
+		"reverse_static":   reverseStaticDefaultTmpl,
+		"reverse_dynamic":  reverseDynamicDefaultTmpl,
+		"reverse_reviewer": reverseReviewerDefaultTmpl,
 	}
 }

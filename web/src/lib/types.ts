@@ -53,6 +53,45 @@ export interface ReverseRuntimeProfile { id: string; name: string; platform: "li
 export interface ReverseRuntimePolicy { enabled: boolean; profile_ids: string[]; artifact_ids: number[]; max_duration_ms: number }
 export interface ReverseRuntimeRun { id: number; task_id: number; artifact_id: number; profile_id: string; status: "running" | "completed" | "failed" | "cancelled"; result_path?: string; last_error?: string; created_at: string; finished_at?: string }
 
+export interface WorkflowRequestEvidenceRef { node_id: number; version: string }
+export interface WorkflowRequestInputFile { path: string; sha256: string; size: number }
+export interface WorkflowRequestInputEvidence extends WorkflowRequestEvidenceRef { kind?: string; payload?: unknown }
+export interface WorkflowRequestResult {
+  status: "accepted" | "unresolved" | string;
+  summary: string;
+  limitations?: string;
+  evidence?: unknown[];
+}
+export interface WorkflowRequest {
+  id: number;
+  request_key: string;
+  source_task_id: number;
+  target_task_id: number;
+  source_intent_id?: number;
+  target_intent_id?: number;
+  question: string;
+  acceptance: string[];
+  input_snapshot: { files?: WorkflowRequestInputFile[]; evidence?: WorkflowRequestInputEvidence[] };
+  status: "pending" | "completed" | "cancelled" | "expired" | string;
+  result?: WorkflowRequestResult;
+  budget_seconds: number;
+  depth: number;
+  parent_request_id?: number;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface WorkflowRequestCreateInput {
+  request_key: string;
+  target_task_id?: number;
+  question: string;
+  acceptance: string[];
+  files: string[];
+  evidence_refs: WorkflowRequestEvidenceRef[];
+  budget_seconds: number;
+  parent_request_id?: number;
+}
+
 export interface TaskCategory {
   id: number;
   name: string;
@@ -696,6 +735,7 @@ export interface Activity {
   detail?: string;
   metadata?: {
     llm_transition?: LLMTransition;
+    agent_config?: { key: string; revision?: number; [key: string]: unknown };
   };
   source_task_id?: string;
   inherited?: boolean;
@@ -735,6 +775,13 @@ export interface TaskLLMResolutions {
   mainagent: TaskLLMResolution;
   planner: TaskLLMResolution;
   worker: TaskLLMResolution;
+  goals?: TaskLLMResolution;
+  reverse_main?: TaskLLMResolution;
+  reverse_goals?: TaskLLMResolution;
+  reverse_planner?: TaskLLMResolution;
+  reverse_static?: TaskLLMResolution;
+  reverse_dynamic?: TaskLLMResolution;
+  reverse_reviewer?: TaskLLMResolution;
 }
 
 // ---- Agent triggers (P3 调度，仅自定义 agent) ----

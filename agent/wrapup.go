@@ -26,17 +26,29 @@ var WrapupMaxTurnsOverride func(agentKey string) (int, bool)
 // 内置默认收尾提示词,按 agent key 索引。worker 复用历史上硬编码的 settleWrapUpPrompt
 // (定义在 worker.go),planner/mainagent 各有一版;未命中的(自定义 agent)走通用兜底。
 var wrapupDefaults = map[string]string{
-	"worker":    settleWrapUpPrompt,
-	"planner":   plannerWrapUpDefault,
-	"mainagent": mainAgentWrapUpDefault,
+	"worker":           settleWrapUpPrompt,
+	"planner":          plannerWrapUpDefault,
+	"mainagent":        mainAgentWrapUpDefault,
+	"reverse_main":     "本次逆向对话即将结束。不要发起新分析；根据已保存材料、证据与结论，用一句话总结当前进度和未解决问题。",
+	"reverse_goals":    "目标分解即将结束。确保已按用户原问题调用 set_goals；不要添加未经提出的目标，完成后停止。",
+	"reverse_planner":  "本轮逆向规划即将结束。只提交已经形成且有明确角色的工作单；必要时安排 reverse_reviewer 独立核验，不要硬凑工作。",
+	"reverse_static":   "静态分析轮次即将结束。只保存已观察到的事实和候选结论，不执行材料；未完成时说明阻塞并结束意图。",
+	"reverse_dynamic":  "动态观察轮次即将结束。不要启动新观察；保存已授权观察的结果与证据，未完成时记录恢复条件。",
+	"reverse_reviewer": "独立核验轮次即将结束。重读现有证据并用 reverse_review_conclusion 记录支持、反证或未决；不得提交结论。",
 }
 
 // wrapupTurnDefaults: 各 agent 收尾阶段【自身】的轮数预算内置默认(可被后台 >0 覆盖)。
 // 均给 10 轮,保证收尾阶段有足够步数落库。未命中走 genericWrapupTurns。
 var wrapupTurnDefaults = map[string]int{
-	"worker":    10,
-	"planner":   10,
-	"mainagent": 10,
+	"worker":           10,
+	"planner":          10,
+	"mainagent":        10,
+	"reverse_main":     8,
+	"reverse_goals":    8,
+	"reverse_planner":  8,
+	"reverse_static":   8,
+	"reverse_dynamic":  8,
+	"reverse_reviewer": 8,
 }
 
 const genericWrapupTurns = 10
@@ -113,8 +125,14 @@ var (
 )
 
 var taskTimeoutWrapupDefaults = map[string]string{
-	"worker":  workerTaskTimeoutDefault,
-	"planner": plannerTaskTimeoutDefault,
+	"worker":           workerTaskTimeoutDefault,
+	"planner":          plannerTaskTimeoutDefault,
+	"reverse_main":     "任务预算已到。停止新分析，用一句话说明已保存的逆向结论和未解决项。",
+	"reverse_goals":    "任务预算已到。只保留已明确提出且可核验的问题目标，不扩展目标；立即完成分解。",
+	"reverse_planner":  "任务预算已到。对证据已接受的目标做最后判定，不派发新工作单。",
+	"reverse_static":   "任务预算已到。停止新静态分析，保存已观察证据并说明未完成项。",
+	"reverse_dynamic":  "任务预算已到。停止新动态观察，保存已授权观察结果并说明未完成项。",
+	"reverse_reviewer": "任务预算已到。仅基于已保存证据给出支持、反证或未决核验结果，不提交候选结论。",
 }
 
 const workerTaskTimeoutDefault = "**整个任务已到达超时上限，即将结束**（不是你这次 run 的预算，是整场探索到点了）。这是最后机会：(1) 把你已识别但还没写回的内容【全部】落库——新资产 insert_assets、探索结论/事实 record_fact、确认漏洞 report_finding；(2) 不要再启动任何新命令/探测；(3) **最后单独用一句话纯文本**总结你在本意图上的关键结论。"

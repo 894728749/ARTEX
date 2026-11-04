@@ -151,6 +151,8 @@ type Engine struct {
 	// (for example an exhausted failover chain) — there is no global-pair fallback.
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+	resolveIntentWorker  func(*Task, *db.Node) (*agent.Worker, error)
+	beforeAgentRun       func(*Task, string, int64)
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
@@ -739,6 +741,11 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 	e.resolveAuthoritative = true
 }
 
+func (e *Engine) SetIntentWorkerResolver(fn func(*Task, *db.Node) (*agent.Worker, error)) {
+	e.resolveIntentWorker = fn
+}
+func (e *Engine) SetAgentRunRecorder(fn func(*Task, string, int64)) { e.beforeAgentRun = fn }
+
 // snapshotFor returns the planner/worker a task should run on, from the task-router
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
@@ -871,11 +878,22 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				return
 			}
 		}
+		if e.m.pg != nil {
+			var waiting bool
+			if err := e.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state='waiting' AND payload ? 'workflow_wait_id') AND NOT EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running') AND NOT(payload ? 'workflow_wait_id'))`, t.Store.ID()).Scan(&waiting); err == nil && waiting {
+				return
+			}
+		}
 		// goalless（人工直投）分支：任务已无 open 目标时 planner 不跑——跑了会重判
 		// met→cancelExec 杀掉用户经主 agent 直投的意图。是否结束改由 frontier 决定：
 		// 还有 open/running 意图 → 保持 running、静默等待；意图已全部跑干 → 落 done。
 		// 整段纯 Go、不触发任何 LLM 调用，也不打规划轮 marker。
-		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
+		var workflowPending bool
+		if e.m.pg != nil {
+			id, _ := parseTaskID(t.ID)
+			_ = e.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, id).Scan(&workflowPending)
+		}
+		if open, err := t.Store.HasOpenGoal(); err == nil && !open && !workflowPending {
 			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
@@ -914,6 +932,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
+		if e.beforeAgentRun != nil {
+			e.beforeAgentRun(t, agent.WorkflowAgentKey(t.Kind, "planner"), 0)
+		}
 		met, reason, err := planner.Plan(runCtx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
 		if e.IsPaused(t.ID) {
@@ -1017,6 +1038,16 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	if e.resolveIntentWorker != nil {
+		selected, err := e.resolveIntentWorker(t, intent)
+		if err != nil || selected == nil {
+			_ = transitionIntentState(t.Store, intent.ID, "running", "blocked")
+			e.emitActivity(t, db.Activity{Worker: name, Kind: "error", IsError: true, NodeID: &intent.ID, Summary: fmt.Sprintf("角色调度失败：%v", err)})
+			t.NotifyDone(intent.ID)
+			return true
+		}
+		worker = selected
+	}
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
@@ -1036,9 +1067,29 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		return true
 	}
 	intent = started
+	if e.beforeAgentRun != nil {
+		key := "worker"
+		if t.Kind == "reverse" {
+			c, _ := db.IntentContract(intent)
+			key, _ = agent.ReverseWorkerKey(c.ExecutionRole)
+		}
+		e.beforeAgentRun(t, key, intent.ID)
+	}
 	_, executionAttempt := db.IntentContract(intent)
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
+	contract, _ := db.IntentContract(intent)
+	if contract.WorkflowRequestID > 0 {
+		r, err := e.m.pg.GetWorkflowRequest(workCtx, contract.WorkflowRequestID)
+		if err != nil || r.Status != "pending" || !r.ExpiresAt.After(time.Now()) {
+			workCancel(nil)
+			_ = transitionIntentState(t.Store, intent.ID, "running", "stopped")
+			return true
+		}
+		var deadlineCancel context.CancelFunc
+		workCtx, deadlineCancel = context.WithDeadline(workCtx, r.ExpiresAt)
+		defer deadlineCancel()
+	}
 	workCtx, liveControl, releaseLive := e.liveRun(workCtx, t.ID, workCancel, false)
 	defer releaseLive()
 	e.registerWork(intent.ID, workCancel)

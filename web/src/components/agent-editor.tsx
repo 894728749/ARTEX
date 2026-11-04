@@ -256,12 +256,14 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   }
   // config is meaningless for the conversational main agent and the fixed-budget
   // goals decomposer; every other agent (workers, custom assistants) honors it.
-  const showConfig = agentKey !== "mainagent" && agentKey !== "goals";
+  const isReverseAgent = agentKey.startsWith("reverse_");
+  const showConfig = isReverseAgent || (agentKey !== "mainagent" && agentKey !== "goals");
   // web search applies to every conversational/executing agent except the one-shot
   // goals decomposer; it's gated by the global master switch.
-  const showWebSearch = agentKey !== "goals";
+  const showWebSearch = !isReverseAgent && agentKey !== "goals";
   // interactive shell (持久 PTY 会话工具族) 同样对除 goals 外的 agent 开放;无全局门控。
-  const showInteractiveShell = agentKey !== "goals";
+  const showInteractiveShell = !isReverseAgent && agentKey !== "goals";
+  const visibleTools = tools.filter((tool) => isReverseAgent ? tool.key.startsWith("reverse__") : !tool.key.startsWith("reverse__"));
   // 每个 agent(含 goals/mainagent)都跑在某个 LLM 上,故「默认模型」绑定对所有 agent 开放。
   const showLLM = true;
   // triggers (P3) only attach to custom agents.
@@ -592,7 +594,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
 
       {/* MCP 可见性 */}
       <TabsContent value="mcp" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <p className="text-muted-foreground mb-3 text-xs">勾选此 Agent 可见的 MCP 服务器。</p>
+        <p className="text-muted-foreground mb-3 text-xs">勾选当前角色可见的 MCP 服务器；逆向角色的绑定与渗透 Agent 相互独立。</p>
         <div className="grid gap-2">
           {mcp.map((m) => (
             <label key={m.id} className="flex items-center gap-2 rounded-md border p-2 text-sm">
@@ -607,7 +609,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
 
       {/* Skill 可见性 */}
       <TabsContent value="skill" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <p className="text-muted-foreground mb-3 text-xs">勾选此 Agent 可见的 Skill。</p>
+        <p className="text-muted-foreground mb-3 text-xs">勾选当前角色可见的 Skill；逆向角色的绑定与渗透 Agent 相互独立。</p>
         <div className="grid gap-2">
           {skills.map((s) => (
             <label key={s.name} className="flex items-center gap-2 rounded-md border p-2 text-sm">
@@ -624,7 +626,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       <TabsContent value="tools" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         <p className="text-muted-foreground mb-3 text-xs">勾选绑定给此 Agent 的内置工具。</p>
         <div className="grid gap-2">
-          {tools.map((t) => {
+          {visibleTools.map((t) => {
             const isTraffic = TRAFFIC_TOOL_KEYS.has(t.key);
             const gated = isTraffic && !captureOn; // traffic tools need 流量捕获 on
             return (
@@ -659,7 +661,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
               </label>
             );
           })}
-          {tools.length === 0 && <span className="text-muted-foreground text-xs">（暂无工具）</span>}
+          {visibleTools.length === 0 && <span className="text-muted-foreground text-xs">（暂无工具）</span>}
         </div>
       </TabsContent>
 

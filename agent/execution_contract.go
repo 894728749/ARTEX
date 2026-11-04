@@ -23,7 +23,9 @@ func workContractSchema() map[string]any {
 		return map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": desc}
 	}
 	return obj(map[string]any{
-		"goal_ids": ids("本任务目标节点"), "hypothesis": str("待证实或推翻的具体假设"),
+		"workflow_request_id": intp("执行跨工作流委托时必须传该请求编号；后续分析/复核工作继续沿用，以便统一预算和取消，仅目标任务可用"),
+		"execution_role":      map[string]any{"type": "string", "enum": []string{"worker", "reverse_static", "reverse_dynamic", "reverse_reviewer"}, "description": "渗透工作使用 worker；逆向按工作内容指定静态/动态/独立核验角色，核验不得交给提交者"},
+		"goal_ids":            ids("本任务目标节点"), "hypothesis": str("待证实或推翻的具体假设"),
 		"acceptance":    stringItems("可核对的验收条件，必须说明预期证据；省略时使用 summary"),
 		"depends_on":    ids("先完成的本任务意图 ID；未满足时等待，不占 Worker 槽。done 只表示验收完成，不代表假设为真"),
 		"direction_key": str("同一具体方向使用稳定键，避免换措辞重复派工"), "novelty": str("与既有工作相比的新证据或不同假设"),
@@ -49,7 +51,14 @@ func executionPlannerGuidance(tools []actool.CoreTool) string {
 		s += " 已有工作因外部故障或预算中断时，先读 execution_result/checkpoint，再用 retry_intent 明确续做一次；失败后等待条件变化，不循环派工。"
 	}
 	s += " prove_goal 必须先 node_detail 分别读取目标和证据，使用目标的 evidence_version 作 goal_version、证据的 evidence_version 作 evidence_version，再核对目标全部条件；严禁仅凭摘要和完成状态盖章。旧提示中要求强制产出意图或直接 goal_met 的条款不再适用。"
-	return s
+	return s + workflowHelpGuidance(tools)
+}
+
+func workflowHelpGuidance(tools []actool.CoreTool) string {
+	if !hasTool(tools, "list_workflow_requests") {
+		return ""
+	}
+	return "\n\n【跨流程协助】每轮先读取 list_workflow_requests，按问题、选定输入和验收条件处理收到的委托，后续工作合同沿用 workflow_request_id。证据不足时调用 request_workflow_help 定向求助；静态客户端逻辑不能证明服务端行为，逆向请求行为验证必须指定已有授权渗透任务。重复请求沿用 request_key；接续委托填写 parent_request_id。完成后必须 return_workflow_result 回传证据与局限，再判任务目标；答案缺失如实回传 unresolved。发出请求后等待，不生成相同工作抢跑。回传结果只作为本任务的候选依据，本任务负责最终验证，不直接把收到的解释登记成已确认漏洞。"
 }
 
 func executionWorkerGuidance(ts *db.ExplorationStore, n *db.Node, tools []actool.CoreTool) string {

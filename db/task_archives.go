@@ -245,6 +245,13 @@ WHERE t.id=$1 AND t.deleted_at IS NULL FOR UPDATE OF t`, taskID).Scan(
 	if !paused && !IsTerminal(status) {
 		return nil, ErrTaskArchiveIneligible
 	}
+	var workflowPending bool
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, taskID).Scan(&workflowPending); err != nil {
+		return nil, err
+	}
+	if workflowPending {
+		return nil, fmt.Errorf("跨流程协助尚未回传、取消或过期，暂不能归档")
+	}
 	var dependent int64
 	err = tx.QueryRow(`SELECT child.id FROM task_relations relation
 JOIN tasks child ON child.id=relation.task_id AND child.deleted_at IS NULL
