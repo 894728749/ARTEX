@@ -1777,6 +1777,13 @@ func (t *Task) NotifyFinding(intentID int64, summary string) {
 	t.Notify()
 }
 
+func (t *Task) NotifyFact(intentID int64, summary string) {
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "fact", IntentID: intentID, Detail: summary})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
 // NotifyGoal records that one OR MORE goals were added in a single set_goals call —
 // by the human via the main agent — then wakes the planner, so the next round spells
 // out "人新增了 N 个目标：…" instead of the planner having to spot new open goals in

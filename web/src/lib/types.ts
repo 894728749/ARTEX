@@ -1,10 +1,11 @@
 // ARTEX domain model — types used across the UI.
 // Derived from the functional spec (section 7: 关键数据形状).
 
-export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
+export type TaskStatus = "created" | "queued" | "running" | "finalizing" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  planning_decision?: {kind: "waiting" | "no_progress"; reason: string; resume_when: string; recorded_at: string};
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   category_id?: number;
@@ -406,7 +407,7 @@ export interface Company {
 // ---- Exploration graph (per task) ----
 export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";
-export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
+export type IntentState = "open" | "waiting" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";

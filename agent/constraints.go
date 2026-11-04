@@ -19,6 +19,13 @@ func constraintBlock(ts *db.ExplorationStore) string {
 	if err != nil || len(rows) == 0 {
 		return ""
 	}
+	return renderConstraints(rows)
+}
+
+// renderConstraints renders one already-loaded constraint snapshot. Callers that
+// need to keep prompts and execution-boundary checks on the same snapshot can
+// load once and pass the rows to both paths.
+func renderConstraints(rows []db.Constraint) string {
 	var allow, deny, rules []string
 	for _, c := range rows {
 		text := strings.TrimSpace(c.Text)

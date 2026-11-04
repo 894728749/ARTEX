@@ -220,6 +220,27 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
+		var fields []string
+		var required []string
+		switch s.Key {
+		case "add_intent":
+			fields = []string{"contract"}
+		case "prove_goal":
+			fields = []string{"goal_version", "evidence_version"}
+			required = []string{"goal_version", "evidence_version", "reason"}
+		case "record_fact":
+			fields = []string{"planning_impact"}
+		}
+		if len(fields) > 0 {
+			props := map[string]any{}
+			schemaProps, _ := s.Schema["properties"].(map[string]any)
+			for _, name := range fields {
+				props[name] = schemaProps[name]
+			}
+			if err := pg.EnsureToolSchemaFields(s.Key, props, required); err != nil {
+				log.Printf("[tools] execution schema %s: %v", s.Key, err)
+			}
+		}
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability

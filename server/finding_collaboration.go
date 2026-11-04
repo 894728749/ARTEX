@@ -264,7 +264,7 @@ func (s *Server) runFindingReviewScheduler() {
 					continue
 				}
 				status, err := s.m.pg.FindingReviewStatus(t.ID)
-				if err != nil || !status.Enabled || status.Running || status.PendingCount < status.BatchSize {
+				if err != nil || t.Paused || !status.Enabled || status.Running || status.PendingCount == 0 || (status.PendingCount < status.BatchSize && !db.IsTerminal(t.Status)) {
 					continue
 				}
 				if _, err = s.startFindingReview(s.ctx, t.ID, false); err != nil {

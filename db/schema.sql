@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS explorations (
 -- planner wakes and processes a round. Drives the ≥R cold-node debounce (measured in
 -- this exploration's own rounds, not global node ids or wall-clock).
 ALTER TABLE explorations ADD COLUMN IF NOT EXISTS round_no BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS planning_state JSONB NOT NULL DEFAULT '{}';
 DROP TRIGGER IF EXISTS trg_exp_upd ON explorations;
 CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -184,7 +185,7 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
-        (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
+        (kind='intent'  AND state IN ('open','waiting','running','paused','done','blocked','exhausted','stopped','deleted')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
@@ -224,12 +225,13 @@ BEGIN
           AND conname='ck_node_state'
           AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
                OR pg_get_constraintdef(oid) NOT LIKE '%superseded%'
-               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%')
+               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%waiting%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
             (kind='begin'   AND state IN ('open')) OR
-            (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
+            (kind='intent'  AND state IN ('open','waiting','running','paused','done','blocked','exhausted','stopped','deleted')) OR
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
@@ -515,7 +517,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     exploration_id BIGINT NOT NULL UNIQUE
                      REFERENCES explorations(id) ON DELETE RESTRICT,
     status         TEXT NOT NULL DEFAULT 'created'
-                     CHECK (status IN ('created','running','paused','done','failed','timeout')),
+                     CHECK (status IN ('created','running','finalizing','paused','done','failed','timeout')),
     paused         BOOLEAN NOT NULL DEFAULT false,
     queued         BOOLEAN NOT NULL DEFAULT false,
     queued_at      TIMESTAMPTZ,
@@ -538,6 +540,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_alive  ON tasks(created_at DESC) WHERE deleted_at IS NULL;
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='tasks'::regclass AND conname='tasks_status_check' AND pg_get_constraintdef(oid) NOT LIKE '%finalizing%') THEN
+  ALTER TABLE tasks DROP CONSTRAINT tasks_status_check;
+  ALTER TABLE tasks ADD CONSTRAINT tasks_status_check CHECK(status IN ('created','running','finalizing','paused','done','failed','timeout'));
+ END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)          WHERE deleted_at IS NULL;
 DROP TRIGGER IF EXISTS trg_tasks_upd ON tasks;
 CREATE TRIGGER trg_tasks_upd BEFORE UPDATE ON tasks

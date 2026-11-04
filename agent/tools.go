@@ -22,7 +22,7 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 	for _, n := range ns {
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
-		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State, "contract": p["contract"], "execution_result": p["execution_result"]}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -66,10 +66,12 @@ type ToolSet struct {
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
-	ownerNode int64
-	GoalMet   bool
-	Reason    string
-	writes    WriteCounts
+	ownerNode         int64
+	executionContract db.WorkContract
+	executionAttempt  int64
+	GoalMet           bool
+	Reason            string
+	writes            WriteCounts
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -88,6 +90,7 @@ type ToolSet struct {
 	// carrying (intentID, summary) so the round can spell out which intent found what.
 	// Wired for workers; nil elsewhere → falls back to notify (bare wake).
 	notifyFinding func(intentID int64, summary string)
+	notifyFact    func(intentID int64, summary string)
 	// resumeTask, if set, revives the task after a graph change that should make a
 	// stopped task run again (currently: set_goals adds a goal). It flips a terminal/
 	// paused task back to running and (re)starts the engine loops — a plain notify()
@@ -412,11 +415,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	running, runningErr := t.ts.ListRunningIntents()
+	if runningErr != nil {
+		out["running_intents_error"] = runningErr.Error()
+	}
+	var recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
-		case "running":
-			running = append(running, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -425,6 +430,18 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
+	if relations, err := t.ts.FindingRelations(); err == nil {
+		out["finding_relations"] = relations
+		out["finding_relation_note"] = "漏洞记录 ID，非探索节点 ID；proposed 关系是假设，不能当作已验证前置"
+	}
+	if waiting, err := t.ts.ListWaitingIntents(); err == nil {
+		out["waiting_intents"] = compactIntents(waiting, parentsOf, yieldsOf)
+	} else {
+		out["waiting_intents_error"] = err.Error()
+	}
+	if decision, err := t.ts.PlanningDecision(); err == nil {
+		out["planning_decision"] = decision
+	}
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
 	// 平行命名——后者只是它的最新窗口截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
@@ -443,8 +460,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// via node_detail(id).
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	if count, err := t.ts.CountKind(db.KindFinding); err == nil {
+		out["findings_total"] = count
+	}
+	if count, err := t.ts.CountKind(db.KindFact); err == nil {
+		out["facts"] = count
+	}
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -1019,6 +1040,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
+	Contract  db.WorkContract   `json:"contract"`
 	Summary   string            `json:"summary"`
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
@@ -1030,6 +1052,9 @@ type intentItem struct {
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
 func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+	return t.addOneIntentContext(context.Background(), it)
+}
+func (t *ToolSet) addOneIntentContext(ctx context.Context, it intentItem) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
@@ -1064,41 +1089,21 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			return 0, fmt.Errorf("%s", b.String())
 		}
 	}
-	payload := map[string]any{"summary": it.Summary}
-	if len(anchors) > 0 {
-		payload["asset_ids"] = anchors
-	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
-	if err != nil {
-		return 0, err
-	}
-	// upstream lineage: link each (validated) fact/finding parent → this intent, so
-	// "multiple facts combine into one new intent" is expressible.
-	for _, parent := range parents {
-		_ = t.ts.Link(parent, db.RelDerivedFrom, id)
-	}
-	// a top-level intent (no explicit parent) connects to the origin fact, so every
-	// intent still traces back to a fact node — at task start the only fact is the
-	// origin, and the first intents derive from it.
-	if len(parents) == 0 {
-		if origin, _ := t.ts.OriginFactID(); origin > 0 {
-			_ = t.ts.Link(origin, db.RelDerivedFrom, id)
-		}
-	}
-	return id, nil
+	return t.ts.AddWorkIntent(ctx, it.Summary, priority, anchors, parents, it.Contract)
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
+			"contract":   workContractSchema(),
 			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
@@ -1109,12 +1114,15 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			if !batch {
 				items = []intentItem{a.intentItem}
 			}
+			if len(items) > 4 {
+				return actool.Errorf("一次最多提交 4 条意图，请优先选择最有价值且相互独立的工作"), nil
+			}
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
 			createdAny := false
 			for i, it := range items {
-				id, err := t.addOneIntent(it)
+				id, err := t.addOneIntentContext(ctx, it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
@@ -1155,50 +1163,26 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 }
 
 func (t *ToolSet) proveGoal() actool.CoreTool {
-	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
-		obj(map[string]any{
-			"goal_id":     idp("目标节点 id"),
-			"evidence_id": idp("证明它的发现/事实节点 id"),
-			"reason":      str("为什么这个证据满足该目标"),
-		}, "goal_id", "evidence_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+	return t.writeExpTool("prove_goal", "使用刚读取的证据内容版本，原子保存目标证明。必须核对所有量化条件；推断、任务起点、已归并或过期证据不可使用。",
+		obj(map[string]any{"goal_id": idp("本任务目标节点"), "goal_version": str("目标 node_detail 的 evidence_version"), "evidence_id": idp("已验证事实或漏洞节点"), "evidence_version": str("证据 node_detail 的 evidence_version"), "reason": str("逐项说明证据如何满足目标")}, "goal_id", "goal_version", "evidence_id", "evidence_version", "reason"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				GoalID     json.RawMessage `json:"goal_id"`
-				EvidenceID json.RawMessage `json:"evidence_id"`
-				Reason     string          `json:"reason"`
+				GoalID      json.RawMessage `json:"goal_id"`
+				EvidenceID  json.RawMessage `json:"evidence_id"`
+				Version     string          `json:"evidence_version"`
+				GoalVersion string          `json:"goal_version"`
+				Reason      string          `json:"reason"`
 			}
-			_ = json.Unmarshal(in, &a)
-			goal, ev := pid(a.GoalID), pid(a.EvidenceID)
-			if goal == 0 || ev == 0 {
-				return actool.Errorf("goal_id 和 evidence_id 必填"), nil
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			goalNode, err := t.ts.GetNode(goal)
-			if err != nil || goalNode == nil || goalNode.Kind != db.KindGoal {
-				return actool.Errorf("goal_id 必须是本任务的目标节点（关联任务目标只读）"), nil
+			all, err := t.ts.ProveGoal(ctx, pid(a.GoalID), db.EvidenceReference{NodeID: pid(a.EvidenceID), Version: a.Version}, a.Reason, a.GoalVersion)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			evidenceNode, err := t.ts.GetNodeWithSources(ev)
-			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
-				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
-			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
-			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
-			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
-			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
-				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
-						break
-					}
-				}
-				if allMet {
-					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
-					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
-				}
-			}
-			return actool.Text(fmt.Sprintf("goal %d marked met", goal)), nil
+			t.GoalMet = all
+			t.Reason = a.Reason
+			return jsonResult(map[string]any{"goal_id": pid(a.GoalID), "state": "met", "all_goals_resolved": all})
 		})
 }
 
@@ -1208,9 +1192,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
-			t.GoalMet = true
-			t.Reason = a.Reason
-			return actool.Text("acknowledged: goal marked met"), nil
+			return actool.Errorf("请用 prove_goal 逐个提交最新证据证明；不能绕过目标验收直接结束任务"), nil
 		})
 }
 
@@ -1304,12 +1286,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
-	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
-	IntentID   json.RawMessage   `json:"intent_id"`
-	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	PlanningImpact string            `json:"planning_impact"`
+	Summary        string            `json:"summary"`
+	Detail         string            `json:"detail"`
+	Evidence       string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
+	Confidence     string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	IntentID       json.RawMessage   `json:"intent_id"`
+	AssetIDs       []json.RawMessage `json:"asset_ids"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1347,6 +1330,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
 	t.writes.Facts++
+	if t.notifyFact != nil && strings.TrimSpace(it.PlanningImpact) != "" {
+		t.notifyFact(intent, fmt.Sprintf("fact #%d: %s；规划影响：%s", id, it.Summary, it.PlanningImpact))
+	}
 	return id, nil
 }
 
@@ -1359,13 +1345,14 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
-			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
-			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
-			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
-			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
+			"facts":           map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"planning_impact": str("仅当该证据解除依赖、推翻关键前提或可验收目标时填写，说明其影响；会立即唤醒规划者，普通观察留空"),
+			"summary":         str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
+			"intent_id":       idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
+			"detail":          str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
+			"evidence":        str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
+			"confidence":      str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+			"asset_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1756,23 +1743,9 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := t.ts.LatestIntentOutputWithSources(id)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
-				}
-			}
-			pick := chosen
-			if pick == nil {
-				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
@@ -1782,7 +1755,7 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
 			}
-			detail, _ := t.ts.ActivityDetailWithSources(pick.ID)
+			detail := pick.Detail
 			if detail == "" {
 				detail = pick.Summary
 			}
@@ -2035,7 +2008,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
-		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
+		t.retryIntent(), t.planningDecision(), t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),

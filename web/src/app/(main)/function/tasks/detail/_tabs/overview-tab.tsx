@@ -441,6 +441,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
+  const waiting = intents.filter((i) => i.state === "waiting");
   const blocked = intents.filter((i) => i.state === "blocked");
   const taskFindings = findings.filter((f) => f.task_id === taskId);
   const goalsPct = task?.goals_total ? Math.round(((task.goals_met ?? 0) / task.goals_total) * 100) : 0;
@@ -459,6 +460,18 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {task?.status === "finalizing" && (
+        <div role="status" className="rounded-lg border p-4 text-sm">
+          目标已验收，正在等待当前工具调用结束并保存记录；队列中的工作已停止领取。
+        </div>
+      )}
+      {task?.planning_decision && (
+        <div className="rounded-lg border p-4 text-sm">
+          <p className="font-medium">上次规划判断：{task.planning_decision.kind === "waiting" ? "等待条件" : "暂无可推进方向"}</p>
+          <p className="mt-1 break-words text-muted-foreground">{task.planning_decision.reason}</p>
+          <p className="mt-1 break-words">恢复条件：{task.planning_decision.resume_when}</p>
+        </div>
+      )}
       {/* 原始任务描述与目标(创建时填写的),置顶便于随时回看。 */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-3">
@@ -1093,6 +1106,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <StatCard label="待领意图" value={open.length} icon={ShieldCheckIcon} sub="frontier 开放" />
+        <StatCard label="等待前置" value={waiting.length} icon={ShieldCheckIcon} sub="前置完成后可领取，不占执行槽位" />
         <StatCard label="确认发现" value={taskFindings.length} icon={BugIcon} sub="本任务" />
         <StatCard label="意图总数" value={intents.length} icon={AlertTriangleIcon} sub="本任务全部意图" />
       </div>

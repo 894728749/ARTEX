@@ -131,7 +131,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir)+"\n\n用户要求停止整个任务时，调用 pause_task_after_tool（当前工具完成后暂停整个任务）；明确要求立即中断时调用 pause_task。不能用 kill_work 代替任务级暂停，排队意图也必须停止领取。", def)
+	constraintSnapshot, err := ts.ListConstraints()
+	if err != nil {
+		return "", fmt.Errorf("读取操作约束: %w", err)
+	}
+	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir)+renderConstraints(constraintSnapshot)+"\n\n用户要求停止整个任务时，调用 pause_task_after_tool（当前工具完成后暂停整个任务）；明确要求立即中断时调用 pause_task。不能用 kill_work 代替任务级暂停，排队意图也必须停止领取。", def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,
@@ -180,6 +184,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		noaSession = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
 	}
 	enableNoa(&opts, m.noaEnabledFn, m.workDir, noaSession, noaWarn(noaSession))
+	installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()

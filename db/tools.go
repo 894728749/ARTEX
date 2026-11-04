@@ -104,6 +104,25 @@ func (d *DB) RefreshToolDefaults(key, desc string, schema json.RawMessage) error
 	return err
 }
 
+// EnsureToolSchemaFields migrates new handler inputs without resetting operator
+// annotations, defaults, bindings, descriptions or the enabled flag.
+func (d *DB) EnsureToolSchemaFields(key string, fields map[string]any, required []string) error {
+	if required == nil {
+		required = []string{}
+	}
+	props, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	req, err := json.Marshal(required)
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`UPDATE tools SET schema=jsonb_set(jsonb_set(schema,'{properties}',$2::jsonb||COALESCE(schema->'properties','{}'::jsonb)),'{required}',
+ (SELECT COALESCE(jsonb_agg(value ORDER BY value),'[]'::jsonb) FROM (SELECT DISTINCT value FROM jsonb_array_elements(COALESCE(schema->'required','[]'::jsonb)||$3::jsonb)) names)) WHERE key=$1 AND system`, key, string(props), string(req))
+	return err
+}
+
 func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var agents []byte

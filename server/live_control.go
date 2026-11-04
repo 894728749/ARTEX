@@ -28,6 +28,8 @@ func (e *Engine) liveRun(ctx context.Context, taskID string, cancel context.Canc
 	e.liveRuns[c] = taskID
 	if !allowPaused && e.IsPaused(taskID) {
 		c.RequestPause()
+	} else if !allowPaused && e.m.TaskStatus(taskID) == "finalizing" {
+		c.RequestStopAfterTool(agent.AbortGoalMet)
 	}
 	e.liveMu.Unlock()
 	return agent.WithLiveControl(ctx, c), c, func() {

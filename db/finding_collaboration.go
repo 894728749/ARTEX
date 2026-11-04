@@ -276,9 +276,29 @@ func (d *DB) BeginFindingReview(ctx context.Context, taskID int64, manual bool) 
 	var enabled bool
 	var batch, pending int
 	var through, attempt int64
+	if !manual {
+		var paused bool
+		var status string
+		err = tx.QueryRowContext(ctx, `SELECT paused,status FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR SHARE`, taskID).Scan(&paused, &status)
+		if err != nil {
+			return
+		}
+		if paused {
+			return 0, 0, nil
+		}
+		// Terminal tasks flush a partial batch once. The attempted watermark below
+		// still prevents repeated paid retries after failure or interruption.
+		if IsTerminal(status) {
+			batch = 1
+		}
+	}
+	tailBatch := batch
 	err = tx.QueryRowContext(ctx, `SELECT enabled,batch_size,reviewed_through,attempted_through FROM finding_review_state WHERE task_id=$1 FOR UPDATE`, taskID).Scan(&enabled, &batch, &through, &attempt)
 	if err != nil {
 		return
+	}
+	if tailBatch == 1 {
+		batch = 1
 	}
 	err = tx.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE id>$2),COALESCE(max(id),0) FROM findings WHERE task_id=$1 AND merged_into IS NULL`, taskID, through).Scan(&pending, &cutoff)
 	if err != nil {

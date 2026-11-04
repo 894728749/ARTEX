@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -65,22 +66,23 @@ func jsonbClean(b []byte) []byte {
 
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
-	FindingID     int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
-	FindingNodeID int64           `json:"finding_node_id,omitempty"`
-	TrafficCount  int             `json:"traffic_count,omitempty"`
-	ID            int64           `json:"id"`
-	Kind          string          `json:"kind"`
-	Payload       json.RawMessage `json:"payload"`
-	Priority      int             `json:"priority"`
-	State         string          `json:"state"`
-	Origin        string          `json:"origin,omitempty"`
-	Owner         string          `json:"owner,omitempty"`
-	BlockedReason string          `json:"blocked_reason,omitempty"`
-	DeleteReason  string          `json:"delete_reason,omitempty"` // 仅意图假删除(state='deleted')时非空
-	Anchors       []int64         `json:"anchors,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	SourceTaskID  int64           `json:"source_task_id,omitempty"`
-	Inherited     bool            `json:"inherited,omitempty"`
+	EvidenceVersion string          `json:"evidence_version,omitempty"`
+	FindingID       int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
+	FindingNodeID   int64           `json:"finding_node_id,omitempty"`
+	TrafficCount    int             `json:"traffic_count,omitempty"`
+	ID              int64           `json:"id"`
+	Kind            string          `json:"kind"`
+	Payload         json.RawMessage `json:"payload"`
+	Priority        int             `json:"priority"`
+	State           string          `json:"state"`
+	Origin          string          `json:"origin,omitempty"`
+	Owner           string          `json:"owner,omitempty"`
+	BlockedReason   string          `json:"blocked_reason,omitempty"`
+	DeleteReason    string          `json:"delete_reason,omitempty"` // 仅意图假删除(state='deleted')时非空
+	Anchors         []int64         `json:"anchors,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	SourceTaskID    int64           `json:"source_task_id,omitempty"`
+	Inherited       bool            `json:"inherited,omitempty"`
 }
 
 // Activity is one worker execution step (= old task_activity).
@@ -201,6 +203,9 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err = s.lockExploration(context.Background(), tx); err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -266,8 +271,19 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 // SetNodeState updates any node's state (never deletes). content_version bumps
 // so a folded member's state flip invalidates its digest's cached body (§5.3).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = s.lockExploration(context.Background(), tx); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
@@ -279,14 +295,26 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 		payload["vulnclass"] = vulnclass
 	}
 	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = s.lockExploration(context.Background(), tx); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE exploration_nodes SET payload=$1,state='open',content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("目标不存在")
 	}
-	return nil
+	_, err = tx.Exec(`DELETE FROM exploration_edges WHERE exploration_id=$1 AND dst_id=$2 AND rel='proves'`, s.expID, id)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
@@ -402,7 +430,7 @@ func (s *ExplorationStore) SoftDeleteIntent(id int64, reason string) (string, er
 		}
 		return "", err
 	}
-	if state != "running" && state != "paused" && state != "open" {
+	if state != "running" && state != "paused" && state != "open" && state != "waiting" {
 		return "", fmt.Errorf("%w: intent state %s cannot be deleted", ErrIntentStateConflict, state)
 	}
 	if _, err := tx.Exec(`UPDATE exploration_nodes
@@ -707,6 +735,7 @@ func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 		return nil, err
 	}
 	n.Payload = json.RawMessage(payload)
+	n.EvidenceVersion = NodeEvidenceVersion(&n)
 	return &n, nil
 }
 
@@ -1155,7 +1184,7 @@ ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
 func (s *ExplorationStore) HasActiveIntent() (bool, error) {
 	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, s.expID).Scan(&exists)
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','waiting','running'))`, s.expID).Scan(&exists)
 	return exists, err
 }
 
@@ -1171,13 +1200,8 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	n, err := s.claimIntent(context.Background(), id, owner, false)
+	return n != nil, err
 }
 
 // Stats returns node counts grouped by kind (for dashboard).

@@ -33,11 +33,12 @@ interface StatusMeta {
 
 const intent: Record<string, StatusMeta> = {
   open: { label: "待领", tone: "slate" },
+  waiting: { label: "等待前置", tone: "amber" },
   running: { label: "执行中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
   done: { label: "已完成", tone: "green" },
   // blocked = 模型/API/网络故障重试用尽，这条意图基本没真正探成（非目标拦截）。
-  blocked: { label: "执行出错", tone: "red" },
+  blocked: { label: "执行受阻", tone: "red" },
   // exhausted = 达到步数/时间预算被中途掐断、只写回部分结果（非方向已探尽）。
   exhausted: { label: "预算耗尽", tone: "violet" },
   // stopped = 历史软删除状态（保留,历史数据）。
@@ -47,6 +48,7 @@ const intent: Record<string, StatusMeta> = {
 };
 
 const task: Record<string, StatusMeta> = {
+  finalizing: { label: "收尾中", tone: "blue" },
   created: { label: "已创建", tone: "slate" },
   queued: { label: "排队中", tone: "amber" },
   running: { label: "运行中", tone: "blue" },

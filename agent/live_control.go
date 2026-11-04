@@ -14,13 +14,14 @@ import (
 // Hooks deliver guidance only at execution boundaries. No goroutine mutates a
 // Session's message slice while Prompt is running.
 type LiveControl struct {
-	mu       sync.Mutex
-	queue    []string
-	seen     map[string]bool
-	closed   bool
-	stopping bool
-	active   int
-	cancel   context.CancelCauseFunc
+	mu        sync.Mutex
+	queue     []string
+	seen      map[string]bool
+	closed    bool
+	stopping  bool
+	stopCause error
+	active    int
+	cancel    context.CancelCauseFunc
 }
 
 type liveControlKey struct{}
@@ -98,10 +99,19 @@ func (c *LiveControl) Close() []string {
 // RequestPause blocks all future tools atomically with tool admission. An active
 // tool retains its context until PostToolUse; an idle/model-only run stops now.
 func (c *LiveControl) RequestPause() {
+	c.RequestStopAfterTool(AbortPausedAfterTool)
+}
+
+func (c *LiveControl) RequestStopAfterTool(cause error) {
 	c.mu.Lock()
+	if c.stopping && !errors.Is(cause, AbortPausedAfterTool) {
+		c.mu.Unlock()
+		return
+	}
 	c.stopping = true
+	c.stopCause = cause
 	if c.active == 0 && c.cancel != nil {
-		c.cancel(AbortPausedAfterTool)
+		c.cancel(c.stopCause)
 	}
 	c.mu.Unlock()
 }
@@ -117,6 +127,7 @@ func (c *LiveControl) Cancel(cause error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopping = true
+	c.stopCause = cause
 	if c.cancel != nil {
 		c.cancel(cause)
 	}
@@ -175,7 +186,7 @@ func (h liveHooks) PostToolUse(ctx context.Context, name string, input, result [
 		c.active--
 	}
 	if c.stopping && c.active == 0 && c.cancel != nil {
-		c.cancel(AbortPausedAfterTool)
+		c.cancel(c.stopCause)
 	}
 }
 
@@ -183,7 +194,11 @@ func (h liveHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []st
 	c := h.control
 	c.mu.Lock()
 	if c.stopping {
+		goalMet := errors.Is(c.stopCause, AbortGoalMet)
 		c.mu.Unlock()
+		if goalMet {
+			return true, nil, "目标已验收，当前工具调用已结束，正在收尾"
+		}
 		return true, nil, "当前工具调用已结束，任务已温和暂停"
 	}
 	text := c.drainLocked()

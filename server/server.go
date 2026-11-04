@@ -1085,6 +1085,8 @@ func (s *Server) resolvedTaskStatus(t *Task) string {
 		return "queued"
 	case lifecycle.Paused || s.engine.IsPaused(t.ID):
 		return "paused"
+	case lifecycle.Status == "finalizing":
+		return "finalizing"
 	case t.llmStateSnapshot().FailoverState == "chain_exhausted" && s.engine.Started(t.ID):
 		// LLM readiness is an execution dependency, not lifecycle state. Keeping
 		// an exhausted task running lets the user edit/reset its chain directly.

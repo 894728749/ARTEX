@@ -86,7 +86,7 @@ func isLiveIntent(n cgNode) bool {
 		return false
 	}
 	switch n.State {
-	case "open", "running", "paused":
+	case "open", "waiting", "running", "paused":
 		return true
 	}
 	return false

@@ -367,9 +367,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
+	tsx.executionContract, tsx.executionAttempt = db.IntentContract(intent)
 	tsx.SetOwnerNode(intent.ID)         // assets this worker discovers anchor to its intent → visible to the task
 	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for assets this worker writes
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
+	tsx.notifyFact, _ = ctx.Value(factNotifierKey{}).(func(int64, string))
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
@@ -394,11 +396,19 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
-	if w.wantConstraints() {
-		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
+	var constraintSnapshot []db.Constraint
+	refreshConstraints := w.wantConstraints()
+	if refreshConstraints {
+		var err error
+		constraintSnapshot, err = ts.ListConstraints()
+		if err != nil {
+			return "", WriteCounts{}, fmt.Errorf("读取操作约束: %w", err)
+		}
+		sysBody += renderConstraints(constraintSnapshot) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)
+	sysBody += executionWorkerGuidance(ts, intent, tools)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
@@ -421,7 +431,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
+	budget := w.runTimeout
+	if seconds := tsx.executionContract.BudgetSeconds; seconds > 0 && (budget == 0 || time.Duration(seconds)*time.Second < budget) {
+		budget = time.Duration(seconds) * time.Second
+	}
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, budget)
 	settle := wrapupSettlement("worker", []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
@@ -470,6 +484,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
+	}
+	if refreshConstraints {
+		installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })
 	}
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx

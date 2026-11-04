@@ -96,12 +96,13 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	started  sync.Map // taskID -> bool, so Run is idempotent per task
-	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
-	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
-	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
-	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
-	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	started      sync.Map // taskID -> bool, so Run is idempotent per task
+	lastAct      sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
+	llmCalls     sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
+	paused       sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
+	deleting     sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
+	dropCnt      sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	claimBackoff sync.Map // taskID -> time.Time; bounded retries after a database failure
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -296,6 +297,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.llmCalls.Delete(taskID)
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
+	e.claimBackoff.Delete(taskID)
 	e.plannerRound.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
@@ -788,7 +790,7 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	// 首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone/心跳唤醒 planner。
 	// ⚠️ 不能用 Frontier(只数 open):worker 领取(open→running)与本检查存在竞态,会误 kick。
 	// 重启自动恢复时也可能只剩 running 意图,同样应跳过。
-	if has, _ := t.Store.HasActiveIntent(); !has {
+	if has, _ := t.Store.HasActiveIntent(); !has || t.lifecycleSnapshot().Status == "finalizing" {
 		t.Notify() // kick the first planning round (acted on once LLM is ready)
 	}
 }
@@ -834,6 +836,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				break drain
 			}
 		}
+		if t.lifecycleSnapshot().Status == "finalizing" {
+			e.advanceGoalFinalization(ctx, t, false)
+			return
+		}
 		planner, _ := e.snapshotFor(t)
 		if planner == nil {
 			return // idle until LLM configured
@@ -854,6 +860,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 触发常规规划轮;终局那一轮由协调器(settleTask)直接驱动,不走这里。
 		if e.isSettling(t.ID) {
 			return
+		}
+		if src == "heartbeat" {
+			if waiting, err := t.Store.PlanningWaitUnchanged(ctx); err == nil && waiting {
+				return
+			}
 		}
 		// goalless（人工直投）分支：任务已无 open 目标时 planner 不跑——跑了会重判
 		// met→cancelExec 杀掉用户经主 agent 直投的意图。是否结束改由 frontier 决定：
@@ -908,14 +919,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
-			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
-			}
-			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
-			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
-			// 归为 stopped(而非 blocked)。
-			e.cancelExec(t.ID, agent.AbortGoalMet)
+			e.advanceGoalFinalization(ctx, t, true)
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
@@ -933,7 +937,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			runRound("heartbeat")
 		}
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
-		resetPlannerTimer(heartbeat, interval)
+		next := interval
+		if t.lifecycleSnapshot().Status == "finalizing" {
+			next = time.Second
+		}
+		resetPlannerTimer(heartbeat, next)
 	}
 }
 
@@ -966,7 +974,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			}
 			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
 		}
-		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
+		if status := e.m.TaskStatus(t.ID); isTerminalStatus(status) || status == "finalizing" {
 			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
@@ -1015,6 +1023,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		return true
 	}
+	started, startErr := t.Store.BeginIntentAttempt(ectx, intent.ID)
+	if startErr != nil {
+		log.Printf("[worker %s] task %s intent %d begin attempt: %v", name, t.ID, intent.ID, startErr)
+		_ = transitionIntentState(t.Store, intent.ID, "running", "blocked")
+		t.NotifyDone(intent.ID)
+		return true
+	}
+	intent = started
+	_, executionAttempt := db.IntentContract(intent)
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	workCtx, liveControl, releaseLive := e.liveRun(workCtx, t.ID, workCancel, false)
@@ -1033,6 +1050,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	label := fmt.Sprintf("%s · #%d", name, iid)
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
+	workCtx = agent.WithFactNotifier(workCtx, t.NotifyFact)
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
@@ -1179,8 +1197,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 	} else {
-		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
+		settledState, stateErr := t.Store.FinishIntentAttempt(context.Background(), intent.ID, executionAttempt, state)
+		if stateErr != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
+		} else {
+			state = settledState
+			if state == "blocked" && err == nil {
+				e.emitActivity(t, db.Activity{NodeID: &iid, Worker: "system", Kind: "text", Summary: "工作未通过验收：结果未提交、仍有阻塞或证据已变化；保留已有产物供复核"})
+			}
 		}
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
@@ -1202,6 +1226,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
+	if status := t.lifecycleSnapshot().Status; status == "finalizing" || isTerminalStatus(status) {
+		return fmt.Errorf("任务已完成或正在收尾")
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1222,12 +1249,12 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	if node == nil || node.Kind != db.KindIntent {
 		return fmt.Errorf("intent not found")
 	}
-	changed, err := t.Store.CompareAndSetIntentState(intentID, "paused", "running")
+	changed, err := t.Store.ClaimPausedIntent(ctx, intentID, "chat")
 	if err != nil {
 		return err
 	}
 	if !changed {
-		return fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+		return fmt.Errorf("%w: 意图不再是 paused 状态，或前置/互斥资源/任务状态不允许执行", db.ErrIntentStateConflict)
 	}
 	node.State, node.Owner = "running", "chat"
 	// Record the human turn as a visible activity BEFORE the run starts, so it is
@@ -1270,14 +1297,18 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	e.liveMu.Lock()
 	defer e.liveMu.Unlock()
-	if e.IsPaused(t.ID) || e.IsDeleting(t.ID) {
+	if status := e.m.TaskStatus(t.ID); e.IsPaused(t.ID) || e.IsDeleting(t.ID) || isTerminalStatus(status) || status == "finalizing" {
 		return nil
 	}
-	fr, _ := t.Store.Frontier(20)
-	for _, in := range fr {
-		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
-			return in
-		}
+	if until, ok := e.claimBackoff.Load(t.ID); ok && time.Now().Before(until.(time.Time)) {
+		return nil
 	}
-	return nil
+	in, err := t.Store.ClaimNextIntent(context.Background(), name)
+	if err != nil {
+		e.claimBackoff.Store(t.ID, time.Now().Add(5*time.Second))
+		log.Printf("[scheduler] task %s claim failed, retry in 5s: %v", t.ID, err)
+		return nil
+	}
+	e.claimBackoff.Delete(t.ID)
+	return in
 }

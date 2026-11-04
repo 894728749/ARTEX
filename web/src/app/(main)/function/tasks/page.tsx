@@ -232,6 +232,7 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "created", label: "已创建" },
   { value: "queued", label: "排队中" },
   { value: "running", label: "运行中" },
+  { value: "finalizing", label: "收尾中" },
   { value: "paused", label: "已暂停" },
   { value: "done", label: "已完成" },
   { value: "failed", label: "失败" },
@@ -245,7 +246,7 @@ const UNCATEGORIZED_VALUE = "uncategorized";
 // 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
 // (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
 // 两边不会出现一个可点、另一个不可点的分歧。
-const PAUSABLE_STATUSES = new Set<TaskStatus>(["created", "queued", "running"]);
+const PAUSABLE_STATUSES = new Set<TaskStatus>(["created", "queued", "running", "finalizing"]);
 const ARCHIVABLE_STATUSES = new Set<TaskStatus>(["paused", "done", "failed", "timeout"]);
 
 function taskControlAction(status: TaskStatus): "pause" | "resume" | null {

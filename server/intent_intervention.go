@@ -93,6 +93,9 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	case isTerminalStatus(lifecycle.Status):
 		writeErr(w, http.StatusConflict, "终态任务无法向 Worker 发送消息")
 		return
+	case lifecycle.Status == "finalizing":
+		writeErr(w, http.StatusConflict, "目标已验收，任务正在等待当前工具结束并收尾")
+		return
 	case s.engine.isSettling(t.ID):
 		writeErr(w, http.StatusConflict, "任务正在收尾，无法向 Worker 发送消息")
 		return
