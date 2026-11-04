@@ -22,8 +22,17 @@ import (
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), workDirs ...string) {
+	workDir := filepath.Dir(skillDir)
+	if len(workDirs) > 0 {
+		workDir = workDirs[0]
+	}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+		if info := agent.RunInfoFrom(ctx); info.TaskID > 0 {
+			if task, err := pg.GetTask(info.TaskID); err == nil && task != nil && task.Kind == "reverse" {
+				return reverseAgentTools(ctx, pg, task, workDir, agentKey)
+			}
+		}
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
 			return nil, agent.DeferredInfo{}, nil

@@ -88,6 +88,10 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		query string
 		args  []any
 	}{
+		{`DELETE FROM reverse_conclusions WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM reverse_runtime_runs WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM reverse_runtime_policies WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM reverse_artifacts WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
@@ -247,6 +251,18 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	for _, table := range []string{"reverse_artifacts", "reverse_conclusions", "reverse_runtime_policies", "reverse_runtime_runs"} {
+		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
+	}
+	// Restoring an archive never silently re-grants execution on a new host.
+	if _, err := tx.Exec(`UPDATE reverse_runtime_policies SET enabled=false WHERE task_id=$1`, taskID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE reverse_runtime_runs SET status='failed',last_error='归档恢复；原运行环境未接续',finished_at=now() WHERE task_id=$1 AND status='running'`, taskID); err != nil {
+		return nil, err
+	}
 	if warning, err := restoreTaskRelations(tx, taskID, remappedTables["task_relations"]); err != nil {
 		return nil, err
 	} else {
@@ -345,7 +361,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,
  timeout_seconds=archived.timeout_seconds,plan_heartbeat_seconds=archived.plan_heartbeat_seconds,
- coverage_enabled=archived.coverage_enabled,pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
+ coverage_enabled=archived.coverage_enabled,kind=COALESCE(archived.kind,current.kind),workflow_version=COALESCE(archived.workflow_version,current.workflow_version),pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
@@ -414,6 +430,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
 		"finding_relations": true, "finding_consolidations": true, "finding_report_rewrites": true,
+		"reverse_artifacts": true, "reverse_conclusions": true,
+		"reverse_runtime_policies": true, "reverse_runtime_runs": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)

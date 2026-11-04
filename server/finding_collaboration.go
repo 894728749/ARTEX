@@ -167,6 +167,21 @@ func (s *Server) registerFindingCollaboration(mux *http.ServeMux) {
 		}
 		writeJSON(w, 202, map[string]any{"accepted": cid > 0, "conversation_id": cid})
 	})
+	mux.HandleFunc("POST /api/tasks/{id}/finding-report-rewrites/retry", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := s.findingTask(w, r)
+		if !ok {
+			return
+		}
+		count, err := s.m.pg.RetryFindingReportRewrites(id)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if count > 0 {
+			go s.runPendingFindingRewrite()
+		}
+		writeJSON(w, 200, map[string]any{"retried": count})
+	})
 }
 
 func (s *Server) findingAgentReady(key string) error {
@@ -280,13 +295,11 @@ func (s *Server) runPendingFindingRewrite() {
 	if s.ctx.Err() != nil {
 		return
 	}
-	if err := s.findingAgentReady("reporter"); err != nil {
-		return
-	}
 	var jobID, findingID, version int64
+	var err error
 	// One rewrite at a time; durable running state guards later ticks. Failed rewrites
 	// require an explicit review retry, never an unbounded paid retry loop.
-	err := s.m.pg.QueryRow(`UPDATE finding_report_rewrites SET status='running' WHERE NOT EXISTS(SELECT 1 FROM finding_report_rewrites WHERE status='running') AND id=(SELECT j.id FROM finding_report_rewrites j JOIN findings f ON f.id=j.finding_id JOIN tasks t ON t.id=f.task_id WHERE j.status='pending' AND f.merged_into IS NULL AND t.deleted_at IS NULL AND NOT t.paused ORDER BY j.id LIMIT 1) RETURNING id,finding_id,evidence_version`).Scan(&jobID, &findingID, &version)
+	jobID, findingID, version, err = s.m.pg.ClaimFindingReportRewrite()
 	if err != nil {
 		return
 	}
@@ -301,6 +314,10 @@ func (s *Server) runPendingFindingRewrite() {
 			log.Printf("[finding rewrite] finish: %v", err)
 		}
 	}()
+	if err := s.findingAgentReady("reporter"); err != nil {
+		failure = err.Error()
+		return
+	}
 	f, err := s.m.pg.GetFinding(findingID)
 	if err != nil {
 		failure = err.Error()
@@ -338,11 +355,15 @@ func (s *Server) runPendingFindingRewrite() {
 		msg = fmt.Sprintf("所属 task_id=%d。\n", *f.TaskID) + msg
 	}
 	runCtx, cancel := s.conversationRunContext(c.ID, key)
+	deadlineCtx, deadlineCancel := context.WithTimeout(runCtx, 15*time.Minute)
+	defer deadlineCancel()
 	if f.TaskID != nil {
-		release := s.trackFindingConversation(runCtx, *f.TaskID, false)
+		// A report rewrite is independent from task execution. Existing explicit
+		// stop controls still reach this conversation through its LiveControl.
+		release := s.trackFindingConversation(deadlineCtx, *f.TaskID, true)
 		defer release()
 	}
-	s.runConversationTurn(runCtx, cancel, c, msg, key)
+	s.runConversationTurn(deadlineCtx, cancel, c, msg, key)
 	fresh, err := s.m.pg.GetFinding(findingID)
 	if err != nil {
 		failure = err.Error()

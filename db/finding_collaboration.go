@@ -251,6 +251,32 @@ type FindingReviewStatus struct {
 	ReportError   string `json:"report_error,omitempty"`
 }
 
+// ClaimFindingReportRewrite claims the oldest report job for a canonical finding.
+// Report rewriting is independent from task execution and remains available
+// while the task is paused.
+func (d *DB) ClaimFindingReportRewrite() (jobID, findingID, version int64, err error) {
+	err = d.QueryRow(`UPDATE finding_report_rewrites SET status='running',last_error=''
+WHERE status='pending' AND id=(SELECT j.id FROM finding_report_rewrites j
+ JOIN findings f ON f.id=j.finding_id JOIN tasks t ON t.id=f.task_id
+ WHERE j.status='pending' AND f.merged_into IS NULL AND t.deleted_at IS NULL
+ AND NOT EXISTS(SELECT 1 FROM finding_report_rewrites WHERE status='running')
+ ORDER BY j.id LIMIT 1)
+RETURNING id,finding_id,evidence_version`).Scan(&jobID, &findingID, &version)
+	return
+}
+
+// RetryFindingReportRewrites makes failed rewrites for the task's latest
+// canonical evidence eligible for one explicit retry.
+func (d *DB) RetryFindingReportRewrites(taskID int64) (int64, error) {
+	res, err := d.Exec(`UPDATE finding_report_rewrites j SET status='pending',last_error=''
+FROM findings f WHERE j.finding_id=f.id AND f.task_id=$1 AND f.merged_into IS NULL
+AND j.evidence_version=f.evidence_version AND j.status='failed'`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *DB) FindingReviewStatus(taskID int64) (out FindingReviewStatus, err error) {
 	if _, err = d.Exec(`INSERT INTO finding_review_state(task_id) VALUES($1) ON CONFLICT DO NOTHING`, taskID); err != nil {
 		return

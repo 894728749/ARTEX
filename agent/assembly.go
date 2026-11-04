@@ -60,7 +60,11 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	if ToolResolve != nil {
 		out = ToolResolve(ctx, agentKey, out)
 	}
-	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	if IsReverse(ctx) {
+		out = reverseTools(out)
+	} else {
+		out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	}
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}

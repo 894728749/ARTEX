@@ -135,7 +135,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	if err != nil {
 		return "", fmt.Errorf("读取操作约束: %w", err)
 	}
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir)+renderConstraints(constraintSnapshot)+"\n\n用户要求停止整个任务时，调用 pause_task_after_tool（当前工具完成后暂停整个任务）；明确要求立即中断时调用 pause_task。不能用 kill_work 代替任务级暂停，排队意图也必须停止领取。", def)
+	sysBody := mainAgentSystem(goal, m.workDir, mainDir)
+	if IsReverse(ctx) {
+		sysBody = reverseSystem("mainagent", goal, mainDir)
+	}
+	system, boundary := deferredSystem(sysBody+renderConstraints(constraintSnapshot)+"\n\n用户要求停止整个任务时，调用 pause_task_after_tool（当前工具完成后暂停整个任务）；明确要求立即中断时调用 pause_task。不能用 kill_work 代替任务级暂停，排队意图也必须停止领取。", def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,
@@ -185,6 +189,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	enableNoa(&opts, m.noaEnabledFn, m.workDir, noaSession, noaWarn(noaSession))
 	installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })
+	if IsReverse(ctx) {
+		opts.EnableWebFetch, opts.EnableWebSearch = false, false
+	}
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()

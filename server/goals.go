@@ -111,6 +111,16 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
+	if t.Kind == "reverse" {
+		id, _ := strconv.ParseInt(t.ID, 10, 64)
+		artifacts, loadErr := s.m.pg.ListReverseArtifacts(id)
+		if loadErr != nil {
+			return false, loadErr
+		}
+		if len(artifacts) == 0 {
+			return false, fmt.Errorf("请先在分析档案上传逆向材料，再启动分析")
+		}
+	}
 	if mode != "bootstrap" {
 		mode = "resume"
 	}

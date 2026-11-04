@@ -570,6 +570,48 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+-- Reverse assessment workflow identity; workflow_version is immutable after creation.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'pentest' CHECK(kind IN ('pentest','reverse'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workflow_version INTEGER NOT NULL DEFAULT 1 CHECK(workflow_version=1);
+CREATE OR REPLACE FUNCTION prevent_task_workflow_identity_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.kind IS DISTINCT FROM OLD.kind OR NEW.workflow_version IS DISTINCT FROM OLD.workflow_version THEN
+    RAISE EXCEPTION 'task workflow identity is immutable';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_task_workflow_identity_immutable ON tasks;
+CREATE TRIGGER trg_task_workflow_identity_immutable BEFORE UPDATE ON tasks
+  FOR EACH ROW EXECUTE FUNCTION prevent_task_workflow_identity_change();
+CREATE TABLE IF NOT EXISTS reverse_artifacts (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  format TEXT NOT NULL DEFAULT '',
+  size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0),
+  sha256 TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_reverse_artifacts_task ON reverse_artifacts(task_id,id);
+CREATE TABLE IF NOT EXISTS reverse_conclusions (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  intent_id BIGINT NOT NULL,
+  node_id BIGINT,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'proposed' CHECK(state IN ('proposed','accepted','rejected','unresolved')),
+  evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+  limitations TEXT NOT NULL DEFAULT '',
+  reviewer_intent_id BIGINT,
+  review TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_reverse_conclusions_task ON reverse_conclusions(task_id,id);
 CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
@@ -1437,6 +1479,26 @@ CREATE TABLE IF NOT EXISTS finding_report_rewrites (
  last_error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE(finding_id,evidence_version)
 );
+
+-- Runtime execution is a separate, task-scoped opt-in. Analysis prompts cannot
+-- grant execution permission or select an arbitrary host process/device.
+CREATE TABLE IF NOT EXISTS reverse_runtime_policies (
+ task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+ enabled BOOLEAN NOT NULL DEFAULT false,
+ profile_ids JSONB NOT NULL DEFAULT '[]', artifact_ids JSONB NOT NULL DEFAULT '[]',
+ max_duration_ms INTEGER NOT NULL DEFAULT 10000 CHECK(max_duration_ms BETWEEN 100 AND 60000),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS reverse_runtime_runs (
+ id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ artifact_id BIGINT NOT NULL REFERENCES reverse_artifacts(id) ON DELETE CASCADE,
+ intent_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+ profile_id TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+ result_path TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_reverse_runtime_runs_task ON reverse_runtime_runs(task_id,id DESC);
 -- Existing data is not retroactively sent to a model on upgrade. New findings
 -- and the explicit manual-review action opt into review after this watermark.
 DO $$ BEGIN

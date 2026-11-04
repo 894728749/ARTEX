@@ -49,6 +49,7 @@ import { InterceptTab } from "./_tabs/intercept-tab";
 import { OverviewTab } from "./_tabs/overview-tab";
 import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
+import { ReverseTab } from "./_tabs/reverse-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
 
 const TABS = [
@@ -365,6 +366,9 @@ function TaskDetailInner() {
       {archiving ? <Spinner /> : <ArchiveIcon />}
     </Button>
   );
+  const visibleTabs = task.kind === "reverse"
+    ? [...TABS.filter((t) => !["findings", "finding-relations", "retests", "assets", "coverage", "intercept", "report"].includes(t.value)), { value: "reverse", label: "分析档案" }]
+    : TABS;
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
@@ -426,7 +430,7 @@ function TaskDetailInner() {
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">
-            {TABS.map((t) => (
+            {visibleTabs.map((t) => (
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
                 {t.value === "intercept" && interceptPendingCount > 0 && (
@@ -445,6 +449,9 @@ function TaskDetailInner() {
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />
         </TabsContent>
+        {task.kind === "reverse" && <TabsContent value="reverse" className="mt-0">
+          <ReverseTab taskId={id} paused={paused || task.status === "paused"} onStart={() => void togglePause()} />
+        </TabsContent>}
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />
         </TabsContent>

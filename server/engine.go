@@ -341,6 +341,11 @@ func (e *Engine) Resume(t *Task) {
 // execContextFor returns a live per-task context derived from parent, recreating
 // it if a prior pause cancelled it.
 func (e *Engine) execContextFor(parent context.Context, taskID string) context.Context {
+	if e.m != nil {
+		if task, ok := e.m.Task(taskID); ok {
+			parent = agent.WithWorkflow(parent, task.Kind)
+		}
+	}
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
 	if e.IsPaused(taskID) {

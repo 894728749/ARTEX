@@ -385,6 +385,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	if IsReverse(ctx) {
+		sysBody = reverseSystem("planner", goal, taskDir)
+	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := p.wantConstraints()
 	if refreshConstraints {
@@ -441,6 +444,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	if refreshConstraints {
 		installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })
+	}
+	if IsReverse(ctx) {
+		opts.EnableWebFetch, opts.EnableWebSearch = false, false
+		if opts.MaxTurns == 0 || opts.MaxTurns > 12 {
+			opts.MaxTurns = 12
+		}
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

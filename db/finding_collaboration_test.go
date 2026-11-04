@@ -1,9 +1,11 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -76,6 +78,65 @@ func TestFindingConsolidationAtomicEvidenceAndLists(t *testing.T) {
 	// Same request cannot duplicate evidence/audit or hide another finding.
 	if err = d.ConsolidateFindings(t.Context(), task.ID, 0, in); err == nil {
 		t.Fatal("accepted stale merge")
+	}
+}
+
+func TestFindingReportRewriteClaimOnPausedTaskAndExplicitRetry(t *testing.T) {
+	d, task, add := collaborationDB(t)
+	findingID := add("paused report")
+	if err := d.SetPaused(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO finding_report_rewrites(finding_id,evidence_version) VALUES($1,0)`, findingID); err != nil {
+		t.Fatal(err)
+	}
+	jobID, claimedFindingID, version, err := d.ClaimFindingReportRewrite()
+	if err != nil || jobID == 0 || claimedFindingID != findingID || version != 0 {
+		t.Fatalf("claim paused task: job=%d finding=%d version=%d err=%v", jobID, claimedFindingID, version, err)
+	}
+	if _, err = d.Exec(`UPDATE finding_report_rewrites SET status='failed',last_error='reporter unavailable' WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	count, err := d.RetryFindingReportRewrites(task.ID)
+	if err != nil || count != 1 {
+		t.Fatalf("explicit retry count=%d err=%v", count, err)
+	}
+	jobID, claimedFindingID, version, err = d.ClaimFindingReportRewrite()
+	if err != nil || jobID == 0 || claimedFindingID != findingID || version != 0 {
+		t.Fatalf("claim retried report: job=%d finding=%d version=%d err=%v", jobID, claimedFindingID, version, err)
+	}
+	if _, err = d.Exec(`UPDATE finding_report_rewrites SET status='completed' WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	secondFindingID := add("second paused report")
+	thirdFindingID := add("third paused report")
+	if _, err = d.Exec(`INSERT INTO finding_report_rewrites(finding_id,evidence_version) VALUES($1,0),($2,0)`, secondFindingID, thirdFindingID); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var claimCount int
+	var claimMu sync.Mutex
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, _, _, claimErr := d.ClaimFindingReportRewrite()
+			if claimErr == nil && id != 0 {
+				claimMu.Lock()
+				claimCount++
+				claimMu.Unlock()
+			} else if claimErr != nil && claimErr != sql.ErrNoRows {
+				t.Errorf("concurrent claim: %v", claimErr)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	var running int
+	if err = d.QueryRow(`SELECT count(*) FROM finding_report_rewrites WHERE status='running'`).Scan(&running); err != nil || claimCount != 1 || running != 1 {
+		t.Fatalf("concurrent single-flight claims=%d running=%d err=%v", claimCount, running, err)
 	}
 }
 

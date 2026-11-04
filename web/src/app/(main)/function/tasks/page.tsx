@@ -311,6 +311,7 @@ export default function TasksPage() {
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
+  const [kindFilter, setKindFilter] = React.useState<"all" | "pentest" | "reverse">("all");
   const [filtersHydrated, setFiltersHydrated] = React.useState(false);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     TASK_SORT_PREFERENCE_KEY,
@@ -357,6 +358,7 @@ export default function TasksPage() {
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return tasks.filter((t) => {
+      if (kindFilter !== "all" && (t.kind ?? "pentest") !== kindFilter) return false;
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (categoryFilter === UNCATEGORIZED_VALUE && t.category_id != null) return false;
       if (
@@ -374,7 +376,7 @@ export default function TasksPage() {
         t.id.toLowerCase().includes(q)
       );
     });
-  }, [tasks, query, statusFilter, categoryFilter]);
+  }, [tasks, query, statusFilter, categoryFilter, kindFilter]);
 
   const sortNowSec = sortField === "duration" ? nowSec : 0;
   const ordered = React.useMemo(() => {
@@ -395,7 +397,7 @@ export default function TasksPage() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: both filters intentionally reset pagination.
   React.useEffect(() => {
     setPage(1);
-  }, [query, statusFilter, categoryFilter, sortField, sortDirection]);
+  }, [query, statusFilter, categoryFilter, kindFilter, sortField, sortDirection]);
 
   const paginated = React.useMemo(
     () => ordered.slice((page - 1) * pageSize, page * pageSize),
@@ -822,6 +824,10 @@ export default function TasksPage() {
                   </SelectGroup>
                 </SelectContent>
               </Select>
+              <Select value={kindFilter} onValueChange={(v) => setKindFilter(v as typeof kindFilter)}>
+                <SelectTrigger className="w-32" aria-label="任务类型"><SelectValue placeholder="任务类型" /></SelectTrigger>
+                <SelectContent><SelectItem value="all">全部类型</SelectItem><SelectItem value="pentest">渗透</SelectItem><SelectItem value="reverse">逆向</SelectItem></SelectContent>
+              </Select>
               <Select value={categoryFilter} onValueChange={setCategoryFilter}>
                 <SelectTrigger className="w-40">
                   <SelectValue placeholder="任务分类" />
@@ -1193,6 +1199,7 @@ const TaskRow = React.memo(function TaskRow({
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
           <TaskNameEditor task={task} onRename={onRename} />
+          <Badge variant="outline" className="shrink-0">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge>
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
@@ -1221,6 +1228,7 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
         {(() => {
+          if (task.kind === "reverse") return <span className="text-muted-foreground" title="逆向任务以分析目标完成度衡量">—</span>;
           const f = task.findings;
           const total = f ? f.critical + f.high + f.medium + f.low : 0;
           if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
@@ -3073,6 +3081,7 @@ function CreateTaskSheet({
   onCategoriesChanged: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
+  const [taskKind, setTaskKind] = React.useState<"pentest" | "reverse">("pentest");
   const [name, setName] = React.useState("");
   const [categoryID, setCategoryID] = React.useState<number | undefined>(undefined);
   const [description, setDescription] = React.useState("");
@@ -3144,23 +3153,25 @@ function CreateTaskSheet({
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       await api.createTask({
+        kind: taskKind,
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
-        sourceTaskIds: sourceTaskIDs,
-        companyIds: companyIDs,
+        sourceTaskIds: taskKind === "pentest" ? sourceTaskIDs : [],
+        companyIds: taskKind === "pentest" ? companyIDs : [],
         timeoutSeconds: timeoutSec,
-        seedFirstIntent,
+        seedFirstIntent: taskKind === "pentest" && seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
-        coverageEnabled,
-        interceptRules: interceptRules
+        coverageEnabled: taskKind === "pentest" && coverageEnabled,
+        interceptRules: taskKind === "pentest" ? interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
-          .filter((r) => r.pattern !== ""),
+          .filter((r) => r.pattern !== "") : [],
       });
       toast.success("任务已创建");
       setName("");
+      setTaskKind("pentest");
       setCategoryID(undefined);
       setDescription("");
       setGoal("");
@@ -3200,12 +3211,20 @@ function CreateTaskSheet({
       >
         <SheetHeader className="border-b p-6">
           <SheetTitle>新建任务</SheetTitle>
-          <SheetDescription>填写测试对象与目标，高级参数可按需展开。</SheetDescription>
+          <SheetDescription>选择任务类型，描述对象与需要回答的问题。</SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid gap-5">
-            <TaskTemplateControls
+            <Field>
+              <FieldLabel htmlFor="task-kind">任务类型</FieldLabel>
+              <Select value={taskKind} onValueChange={(value) => setTaskKind(value as "pentest" | "reverse")}>
+                <SelectTrigger id="task-kind"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="pentest">渗透测试</SelectItem><SelectItem value="reverse">逆向分析</SelectItem></SelectContent>
+              </Select>
+              <FieldDescription>{taskKind === "reverse" ? "创建后上传分析材料，再启动分析；当前自动分析支持 JavaScript。" : "围绕指定目标规划测试，验证安全假设并整理证据。"}</FieldDescription>
+            </Field>
+            {taskKind === "pentest" && <TaskTemplateControls
               description={description}
               goal={goal}
               categoryID={categoryID}
@@ -3220,7 +3239,7 @@ function CreateTaskSheet({
                 setUploadCount(0);
               }}
               portalContainer={sheetContentRef}
-            />
+            />}
             <div className="grid gap-2">
               <Label htmlFor="name">名称（可选）</Label>
               <Input
@@ -3246,12 +3265,12 @@ function CreateTaskSheet({
               <Textarea
                 id="description"
                 className="min-h-32"
-                placeholder="测试对象与背景，例如：测试 example.com 这个站点"
+                placeholder={taskKind === "reverse" ? "样本来源、目标平台/架构与已知背景" : "测试对象与背景，例如：测试 example.com 这个站点"}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
-              {/* 上传文件(可多选):暂存到 drafts/,把绝对路径追加进上方描述,worker 据此 Read/Bash 打开。 */}
-              <div className="flex flex-wrap items-center gap-2">
+              {/* 渗透任务沿用草稿上传；逆向材料在任务创建后进入分析档案，不向描述写入本机路径。 */}
+              {taskKind === "pentest" && <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3274,19 +3293,19 @@ function CreateTaskSheet({
                     ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
                     : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
                 </span>
-              </div>
+              </div>}
             </div>
             <div className="grid gap-2">
               <Label htmlFor="goal">目标</Label>
               <Textarea
                 id="goal"
                 className="min-h-32"
-                placeholder="要达成什么，例如：拿下后台管理权限、获取服务器权限"
+                placeholder={taskKind === "reverse" ? "分析目标，例如：梳理初始化流程、关键函数与可验证行为" : "要达成什么，例如：拿下后台管理权限、获取服务器权限"}
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
               />
             </div>
-            <Field>
+            {taskKind === "pentest" && <Field>
               <FieldLabel htmlFor="source-tasks">关联任务</FieldLabel>
               <SourceTaskPicker
                 tasks={tasks}
@@ -3298,8 +3317,8 @@ function CreateTaskSheet({
                 最多关联 {MAX_SOURCE_TASKS}{" "}
                 个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
               </FieldDescription>
-            </Field>
-            <Field>
+            </Field>}
+            {taskKind === "pentest" && <Field>
               <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
               <CompanyPicker
                 companies={companies}
@@ -3311,14 +3330,14 @@ function CreateTaskSheet({
                 创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
                 作为范围上下文；不会自动生成意图或强制改变执行目标。
               </FieldDescription>
-            </Field>
-            <Field>
+            </Field>}
+            {taskKind === "pentest" && <Field>
               <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
               <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
               <FieldDescription>
                 仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
               </FieldDescription>
-            </Field>
+            </Field>}
             <Field>
               <FieldLabel htmlFor="llm-profiles">LLM 配置链</FieldLabel>
               <TaskLLMProfileChain
@@ -3336,7 +3355,7 @@ function CreateTaskSheet({
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
                 <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
                 高级设置
-                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · 首个意图</span>
+                <span className="text-muted-foreground ml-auto text-xs font-normal">{taskKind === "reverse" ? "超时 · 心跳" : "超时 · 心跳 · 首个意图"}</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
                 <div className="grid gap-2">
@@ -3370,7 +3389,7 @@ function CreateTaskSheet({
                     worker）。下限 10 分钟。
                   </p>
                 </div>
-                <div className="grid gap-2">
+                {taskKind === "pentest" && <div className="grid gap-2">
                   <label htmlFor="seed-first-intent" className="flex items-center gap-2 text-sm">
                     <Checkbox
                       id="seed-first-intent"
@@ -3383,8 +3402,8 @@ function CreateTaskSheet({
                     开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
                     接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
                   </p>
-                </div>
-                <div className="grid gap-2">
+                </div>}
+                {taskKind === "pentest" && <div className="grid gap-2">
                   <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
                     <Checkbox
                       id="coverage-enabled"
@@ -3397,7 +3416,7 @@ function CreateTaskSheet({
                     默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
                     态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
                   </p>
-                </div>
+                </div>}
               </CollapsibleContent>
             </Collapsible>
           </div>

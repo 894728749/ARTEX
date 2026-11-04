@@ -576,6 +576,10 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		args  []any
 	}{
 		{"tasks", `SELECT * FROM tasks WHERE id=$1`, []any{taskID}},
+		{"reverse_artifacts", `SELECT * FROM reverse_artifacts WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"reverse_conclusions", `SELECT * FROM reverse_conclusions WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"reverse_runtime_policies", `SELECT * FROM reverse_runtime_policies WHERE task_id=$1`, []any{taskID}},
+		{"reverse_runtime_runs", `SELECT * FROM reverse_runtime_runs WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"explorations", `SELECT * FROM explorations WHERE id=$1`, []any{expID}},
 		{"exploration_nodes", `SELECT * FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"exploration_edges", `SELECT * FROM exploration_edges WHERE exploration_id=$1 ORDER BY src_id,dst_id`, []any{expID}},

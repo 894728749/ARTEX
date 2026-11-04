@@ -396,6 +396,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
+	if IsReverse(ctx) {
+		sysBody = reverseSystem("worker", "完成当前工作单，服务任务原问题", runDir)
+	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := w.wantConstraints()
 	if refreshConstraints {
@@ -427,7 +430,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			}
 		}
 	}
-	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
+	if IsReverse(ctx) {
+		sysBody += "\n\n执行本条逆向工作单，保存证据与结论并提交 complete_intent，做完即停。"
+	} else {
+		sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
+	}
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
@@ -484,6 +491,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
+	}
+	if IsReverse(ctx) {
+		opts.EnableWebFetch, opts.EnableWebSearch = false, false
+		if opts.MaxTurns == 0 || opts.MaxTurns > 16 {
+			opts.MaxTurns = 16
+		}
+		if opts.MaxDuration == 0 || opts.MaxDuration > 12*time.Minute {
+			opts.MaxDuration = 12 * time.Minute
+		}
 	}
 	if refreshConstraints {
 		installConstraintRefresh(&opts, constraintSnapshot, func(context.Context) ([]db.Constraint, error) { return ts.ListConstraints() })

@@ -51,6 +51,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { api, sseUrl } from "@/lib/api";
+import { mergeHistoryRefresh } from "@/lib/activity-merge";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
@@ -657,6 +658,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // latest/older interleaving). Writes are ALWAYS keyed, so a late response can only
   // touch its own session cache — never the currently-viewed one (see §7.5).
   const reqTokenRef = React.useRef<Record<string, number>>({});
+  const refreshInFlightRef = React.useRef<Set<string>>(new Set());
+  const refreshQueuedRef = React.useRef<Set<string>>(new Set());
+  const currentTaskIdRef = React.useRef(taskId);
+  currentTaskIdRef.current = taskId;
+  const storeRef = React.useRef(store);
+  storeRef.current = store;
   // Keys with a latest-page load in flight — dedups the double trigger where the
   // first-load effect and the active-session effect both want "main" on mount (the
   // former also opens the SSE, so it must not be pre-empted).
@@ -745,6 +752,62 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           patchStore(key, (s) => ({ ...s, loading: false, error: (e as Error).message || "加载失败" }));
         })
         .finally(() => loadingKeysRef.current.delete(key));
+    },
+    [taskId, patchStore],
+  );
+
+  // Reconcile the visible transcript with persisted history after a send and while
+  // the task SSE is reconnecting. SSE remains the low-latency path; this keyed fetch
+  // closes gaps without replacing live frames or stale pages.
+  const refreshSessionLatest = React.useCallback(
+    (key: string) => {
+      if (MOCK) return;
+      const requestKey = `${taskId}:${key}`;
+      if (refreshInFlightRef.current.has(requestKey)) {
+        refreshQueuedRef.current.add(requestKey);
+        return;
+      }
+      refreshInFlightRef.current.add(requestKey);
+      const tokenKey = `refresh:${requestKey}`;
+      const token = (reqTokenRef.current[tokenKey] ?? 0) + 1;
+      reqTokenRef.current[tokenKey] = token;
+      const requestSnapshot = new Map((storeRef.current[key]?.items ?? []).map((item) => [item.seq, item]));
+      void api
+        .activityHistory(taskId, key, 0, PAGE)
+        .then((r) => {
+          if (currentTaskIdRef.current !== taskId || reqTokenRef.current[tokenKey] !== token) return;
+          patchStore(key, (s) => {
+            // A session-only refresh must not advance the all-task SSE cursor.
+            let items = mergeHistoryRefresh(s.items, r.items, requestSnapshot);
+            let hasMore = s.loaded ? s.hasMore : r.hasMore;
+            let earliestSeq = items.length ? items[0].seq : s.earliestSeq;
+            const trimmable = key !== activeKeyRef.current || atBottomRef.current;
+            if (trimmable && items.length > MAX_KEEP) {
+              items = items.slice(items.length - MAX_KEEP);
+              hasMore = true;
+              earliestSeq = items[0].seq;
+            }
+            return {
+              ...s,
+              items,
+              loaded: true,
+              hasMore,
+              earliestSeq,
+              unread: activeKeyRef.current === key ? 0 : s.unread,
+              lastTs: items.length ? items[items.length - 1].ts : s.lastTs,
+              error: undefined,
+            };
+          });
+        })
+        .catch(() => {
+          // EventSource reconnects independently; the next bounded poll retries.
+        })
+        .finally(() => {
+          refreshInFlightRef.current.delete(requestKey);
+          if (refreshQueuedRef.current.delete(requestKey) && currentTaskIdRef.current === taskId) {
+            refreshSessionLatest(key);
+          }
+        });
     },
     [taskId, patchStore],
   );
@@ -1296,6 +1359,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const isSystem = active.role === "system";
   const activeKey = keyForSession(active);
   const activeState = store[activeKey];
+  React.useEffect(() => {
+    if (!isMain || MOCK) return;
+    const timer = window.setInterval(() => refreshSessionLatest(activeKey), sseLive ? 10_000 : 3000);
+    return () => window.clearInterval(timer);
+  }, [activeKey, isMain, refreshSessionLatest, sseLive]);
   // A main turn is serialized per task (chat lock), so "busy" is task-wide: while any
   // main segment is mid-turn the active composer is disabled. Clear it the moment the
   // active session's terminal record (kind='result', or an error) lands, so the input
@@ -1519,6 +1587,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   function send() {
     const text = input.trim();
     const atts = attachments;
+    const segment = active.seg ?? 0;
     if (side.handleCommand(text, () => setInput(""))) return;
     if ((!text && atts.length === 0) || sending) return;
     // No optimistic echo: the backend persists+broadcasts the human turn before it
@@ -1530,11 +1599,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setSending(true);
     chatStatusRequestRef.current++;
     api
-      .chat(text, taskId, atts.length > 0 ? atts : undefined, active.seg ?? 0)
+      .chat(text, taskId, atts.length > 0 ? atts : undefined, segment)
       .then(({ mode, status }) => {
         chatStatusRequestRef.current++;
         if (status !== "steering") setMainChatRunning(mode === "llm");
         else setMainChatRunning(true);
+        refreshSessionLatest(mainSessionKey(segment));
       })
       .catch((e) => {
         setInput(text); // restore so the user doesn't lose their text / attachments

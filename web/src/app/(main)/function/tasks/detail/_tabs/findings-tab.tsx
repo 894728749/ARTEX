@@ -144,6 +144,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
   const [review, setReview] = React.useState<FindingReviewStatus | null>(null);
   const [reviewError, setReviewError] = React.useState("");
   const [reviewBusy, setReviewBusy] = React.useState(false);
+  const [rewriteRetryBusy, setRewriteRetryBusy] = React.useState(false);
   const [batchSizeDraft, setBatchSizeDraft] = React.useState(3);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
     FINDING_SORT_PREFERENCE_KEY,
@@ -221,6 +222,21 @@ export function FindingsTab({ taskId }: { taskId: string }) {
     }
   };
 
+  const retryReportRewrites = async () => {
+    if (rewriteRetryBusy) return;
+    setRewriteRetryBusy(true);
+    try {
+      const result = await api.retryFindingReportRewrites(taskId);
+      toast.success(result.retried ? `已重新排队 ${result.retried} 份报告` : "没有可重试的失败报告");
+      const updated = await api.findingReviewStatus(taskId);
+      setReview(updated);
+    } catch (error) {
+      toast.error((error as Error).message || "报告重试失败");
+    } finally {
+      setRewriteRetryBusy(false);
+    }
+  };
+
   const onStatus = React.useCallback(async (f: Finding, next: FindingStatus) => {
     if (f.inherited || !f.finding_id || next === f.status) return;
     const prev = f.status;
@@ -290,6 +306,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
               }}
             />
           </label>
+          {!!review?.report_error && <Button size="sm" variant="outline" onClick={() => void retryReportRewrites()} disabled={rewriteRetryBusy}>{rewriteRetryBusy ? "提交中…" : "重试失败报告"}</Button>}
           <Button size="sm" onClick={() => void runReview()} disabled={reviewBusy || !!review?.running}>
             {reviewBusy || review?.running ? "检查中…" : "立即检查 / 归类"}
           </Button>

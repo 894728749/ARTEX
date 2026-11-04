@@ -47,6 +47,13 @@ func TestFindingCollaborationAPIsAndReviewerScope(t *testing.T) {
 	if res.Code != 400 {
 		t.Fatal(res.Code, res.Body)
 	}
+	if _, err = s.m.pg.Exec(`INSERT INTO finding_report_rewrites(finding_id,evidence_version,status,last_error) VALUES($1,$2,'failed','reporter unavailable') ON CONFLICT(finding_id,evidence_version) DO UPDATE SET status='failed',last_error='reporter unavailable'`, first.FindingID, f.EvidenceVersion); err != nil {
+		t.Fatal(err)
+	}
+	res = request("POST", base+"/finding-report-rewrites/retry", `{}`)
+	if res.Code != 200 || !strings.Contains(res.Body.String(), `"retried":1`) {
+		t.Fatal("report retry API", res.Code, res.Body)
+	}
 	reviewer, err := s.m.pg.GetAgentByKey(findingReviewerKey)
 	if err != nil || reviewer == nil {
 		t.Fatal("reviewer seed failed", err)

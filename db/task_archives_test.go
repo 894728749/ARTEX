@@ -132,7 +132,7 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	if err := d.EnsureLLMUsageTable(); err != nil {
 		t.Fatal(err)
 	}
-	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{Name: "cold task"})
+	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{Name: "cold task", Kind: "reverse"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +164,18 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		_, _ = d.Exec(`DELETE FROM companies WHERE id=$1`, companyID)
 	}()
 	if err := d.SetPaused(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	runtimeArtifact, err := d.AddReverseArtifact(task.ID, ReverseArtifact{Name: "archived runtime fixture", Path: "tasks/runtime/artifacts/fixture", Format: "elf", SizeBytes: 1, SHA256: "archive-fixture-sha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePolicy := ReverseRuntimePolicy{Enabled: true, ProfileIDs: []string{"archive-lab"}, ArtifactIDs: []int64{runtimeArtifact.ID}, MaxDurationMS: 5000}
+	if err := d.SetReverseRuntimePolicy(t.Context(), task.ID, runtimePolicy); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRunID, err := d.BeginReverseRuntimeRun(t.Context(), task.ID, runtimeArtifact.ID, 0, "archive-lab", 1000)
+	if err != nil {
 		t.Fatal(err)
 	}
 	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: fmt.Sprintf("archive-%d.example", task.ID), TaskID: task.ID})
@@ -221,6 +233,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
+	}
+	if snapshot.DataCounts["reverse_runtime_policies"] != 1 || snapshot.DataCounts["reverse_runtime_runs"] != 1 {
+		t.Fatalf("runtime policy/run missing from archive snapshot: %#v", snapshot.DataCounts)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
 		t.Fatal(err)
@@ -284,6 +299,14 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if live.Name != "cold task" || !live.Paused {
 		t.Fatalf("restored task metadata mismatch: %+v", live)
+	}
+	restoredPolicy, err := d.ReverseRuntimePolicy(task.ID)
+	if err != nil || restoredPolicy.Enabled {
+		t.Fatalf("restored runtime authorization must be disabled: %+v, %v", restoredPolicy, err)
+	}
+	restoredRuns, err := d.ListReverseRuntimeRuns(task.ID)
+	if err != nil || len(restoredRuns) != 1 || restoredRuns[0].ID != runtimeRunID || restoredRuns[0].Status != "failed" || restoredRuns[0].LastError != "归档恢复；原运行环境未接续" {
+		t.Fatalf("restored runtime run must preserve history and fail closed: %+v, %v", restoredRuns, err)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {
 		t.Fatal(err)

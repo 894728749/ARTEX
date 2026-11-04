@@ -2,9 +2,12 @@
 // Derived from the functional spec (section 7: 关键数据形状).
 
 export type TaskStatus = "created" | "queued" | "running" | "finalizing" | "paused" | "done" | "failed" | "timeout";
+export type TaskKind = "pentest" | "reverse";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  kind?: TaskKind;
+  workflow_version?: number;
   planning_decision?: {kind: "waiting" | "no_progress"; reason: string; resume_when: string; recorded_at: string};
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
@@ -41,6 +44,14 @@ export interface Task {
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
+
+export interface ReverseArtifact { id: number; task_id: number; name: string; format: string; size_bytes: number; sha256: string; source: string; version: string; created_at: string }
+export interface ReverseEvidence { artifact_id: number; locator: string; observation: string; result_path?: string }
+export interface ReverseConclusion { id: number; task_id: number; intent_id: number; node_id?: string; question: string; answer: string; state: "proposed" | "accepted" | "rejected" | "unresolved"; evidence: ReverseEvidence[]; limitations: string; reviewer_intent_id?: number; review: string; created_at: string; reviewed_at?: string }
+export interface ReverseReadiness { available: boolean; command: string; version: string; tool_count: number; formats: string[]; limitations: string[]; engines: { id: string; name: string; available: boolean; reason?: string }[]; error?: string }
+export interface ReverseRuntimeProfile { id: string; name: string; platform: "linux" | "windows" | "android"; available: boolean; engine_version?: string; limits: string }
+export interface ReverseRuntimePolicy { enabled: boolean; profile_ids: string[]; artifact_ids: number[]; max_duration_ms: number }
+export interface ReverseRuntimeRun { id: number; task_id: number; artifact_id: number; profile_id: string; status: "running" | "completed" | "failed" | "cancelled"; result_path?: string; last_error?: string; created_at: string; finished_at?: string }
 
 export interface TaskCategory {
   id: number;

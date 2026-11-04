@@ -2,14 +2,32 @@
 
 # ARTEX
 
-AI 自主渗透测试系统（Go 后端 + Next.js 前端）
+AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
-📦 **该仓库为ARTEX最后一个版本纯源码备份，docker部署源失效自行让AI本地构建即可**
+📦 **本仓库在 ARTEX 0.3.15 源码备份基础上继续维护。旧 Docker 镜像源可能不可用，请按源码构建。**
 
 </div>
+
+---
+
+## 当前版本与配置
+
+任务创建支持“渗透测试”和“逆向分析”两条流程。逆向接入 REA 6.8.0 的 JavaScript、APK/JADX、.NET 元数据与 IL、原生/Ghidra 分析，并提供 Windows、Linux、Android 的独立授权 Frida 运行时观察；材料、原始证据、独立结论复核和报告形成单独流程。安装及工作流见 [逆向任务接入](docs/逆向任务接入.md)。
+
+本地 Agent、MCP 启用状态、工具绑定、触发器、Skills 和隐私网关通过显式配置包同步，见 [本地配置同步](docs/本地配置同步.md)。配置包不包含模型凭据、数据库密码或任务数据，导入时需按文档配置本机路径和环境变量。
+
+三个里程碑标签：
+
+| 标签 | 版本内容 |
+| --- | --- |
+| `artex-baseline` | 最开始的 ARTEX 0.3.15 源码备份 |
+| `artex-optimized` | 实时引导与漏洞整理、执行合同、依赖调度、证据验收、收尾及关联图优化 |
+| `artex-reverse-v1` | 独立逆向流程与运行时观察、消息实时补取及报告重写修复、本地配置包 |
+
+执行机制见 [执行链路验收与调度](docs/执行链路验收与调度.md)。跨设备协作尚未实现。
 
 ---
 
@@ -71,7 +89,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
+git clone https://github.com/cyy081021/ARTEX.git
 cd ARTEX
 ./install.sh
 ```
@@ -86,7 +104,7 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
+git clone https://github.com/cyy081021/ARTEX.git
 cd ARTEX
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
 docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres

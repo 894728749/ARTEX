@@ -386,6 +386,19 @@ func (s *ExplorationStore) ProveGoal(ctx context.Context, goal int64, ref Eviden
 	if NodeEvidenceVersion(ev) != ref.Version {
 		return false, fmt.Errorf("证据版本已变化，请重新读取并核对")
 	}
+	var taskKind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL`, s.expID).Scan(&taskKind); err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if taskKind == "reverse" {
+		var accepted bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM reverse_conclusions c JOIN tasks t ON t.id=c.task_id WHERE t.exploration_id=$1 AND c.node_id=$2 AND c.state='accepted' AND c.reviewer_intent_id<>c.intent_id)`, s.expID, ref.NodeID).Scan(&accepted); err != nil {
+			return false, err
+		}
+		if !accepted {
+			return false, fmt.Errorf("逆向目标只能由另一条意图已接受的结论证明；调查元数据、提交记录和未核验候选解释不足以证明目标")
+		}
+	}
 	proof, _ := json.Marshal(map[string]any{"evidence": ref, "reason": reason, "checked_at": time.Now().UTC()})
 	if _, err = tx.ExecContext(ctx, `INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.expID, ref.NodeID, RelProves, goal); err != nil {
 		return false, err

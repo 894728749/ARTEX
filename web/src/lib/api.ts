@@ -83,6 +83,13 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskKind,
+  ReverseArtifact,
+  ReverseConclusion,
+  ReverseReadiness,
+  ReverseRuntimeProfile,
+  ReverseRuntimePolicy,
+  ReverseRuntimeRun,
   TaskArchive,
   TaskArchivePage,
   TaskAssetMutation,
@@ -209,6 +216,16 @@ const patch = <T>(p: string, body?: unknown) =>
   http<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
 const del = <T>(p: string, body?: unknown) =>
   http<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
+const downloadBlob = async (path: string, fallbackName: string) => {
+  const token = getToken();
+  const r = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`下载失败(${r.status})`);
+  const blob = await r.blob();
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = url; a.download = decodeURIComponent(filename); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+};
 
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
@@ -251,6 +268,7 @@ export const api = {
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
+    kind?: TaskKind;
     name?: string;
     categoryId?: number;
     description: string;
@@ -266,6 +284,8 @@ export const api = {
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
+      kind: input.kind ?? "pentest",
+      workflow_version: 1,
       category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,
@@ -278,6 +298,22 @@ export const api = {
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
+  reverseArtifacts: (taskId: string) => get<ReverseArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/reverse/artifacts`).then(arr),
+  uploadReverseArtifact: async (taskId: string, file: File, source: string, version: string) => {
+    if (MOCK) return { id: Date.now(), task_id: Number(taskId), name: file.name, format: file.name.split(".").pop() ?? "", size_bytes: file.size, sha256: "", source, version, created_at: new Date().toISOString() } as ReverseArtifact;
+    const fd = new FormData(); fd.append("file", file); fd.append("source", source); fd.append("version", version);
+    const token = getToken();
+    const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/reverse/artifacts`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
+    if (!r.ok) { const body = await r.json().catch(() => ({})); throw new Error(body?.error || `上传失败(${r.status})`); }
+    return r.json() as Promise<ReverseArtifact>;
+  },
+  downloadReverseArtifact: (taskId: string, artifactId: number) => downloadBlob(`/tasks/${encodeURIComponent(taskId)}/reverse/artifacts/${artifactId}/download`, `artifact-${artifactId}`),
+  reverseConclusions: (taskId: string) => get<ReverseConclusion[]>(`/tasks/${encodeURIComponent(taskId)}/reverse/conclusions`).then(arr),
+  reverseReadiness: () => get<ReverseReadiness>("/reverse/readiness"),
+  reverseRuntimeProfiles: () => get<ReverseRuntimeProfile[]>("/reverse/runtime-profiles").then(arr),
+  reverseRuntime: (taskId: string) => get<{policy: ReverseRuntimePolicy; runs: ReverseRuntimeRun[]}>(`/tasks/${encodeURIComponent(taskId)}/reverse/runtime`),
+  setReverseRuntime: (taskId: string, policy: ReverseRuntimePolicy) => put<ReverseRuntimePolicy>(`/tasks/${encodeURIComponent(taskId)}/reverse/runtime`, policy),
+  downloadReverseReport: (taskId: string) => downloadBlob(`/tasks/${encodeURIComponent(taskId)}/reverse/report`, `reverse-task-${taskId}.md`),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
@@ -574,6 +610,8 @@ export const api = {
     del<{ deleted: boolean }>(`/tasks/${taskId}/finding-relations/${encodeURIComponent(relationId)}`),
   runFindingReview: (taskId: string) =>
     post<{ accepted?: boolean; status?: string }>(`/tasks/${taskId}/finding-review`, {}),
+  retryFindingReportRewrites: (taskId: string) =>
+    post<{ retried: number }>(`/tasks/${taskId}/finding-report-rewrites/retry`, {}),
   findingReviewStatus: (taskId: string) => get<FindingReviewStatus>(`/tasks/${taskId}/finding-review-status`),
   updateFindingReviewStatus: (taskId: string, input: { enabled?: boolean; batch_size?: number }) =>
     patch<FindingReviewStatus>(`/tasks/${taskId}/finding-review-status`, input),

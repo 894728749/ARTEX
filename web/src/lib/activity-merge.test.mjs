@@ -1,4 +1,4 @@
-import { mergeActivities } from "./activity-merge.ts";
+import { mergeActivities, mergeHistoryRefresh } from "./activity-merge.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -51,4 +51,15 @@ test("merging does not mutate either response and keeps distinct IDs", () => {
   );
   assert.equal(first.length, 1);
   assert.equal(second.length, 2);
+});
+
+test("history refresh updates unchanged rows but preserves live same-seq updates", () => {
+  const stale = activity(198, "tool_use", { summary: "running" });
+  const completed = activity(198, "tool_result", { summary: "completed" });
+  const liveUpdate = activity(198, "tool_result", { summary: "live completion" });
+  const fromSnapshot = mergeHistoryRefresh([stale], [completed], new Map([[198, stale]]));
+  assert.equal(fromSnapshot[0], completed);
+
+  const arrivedDuringRequest = mergeHistoryRefresh([liveUpdate], [completed], new Map([[198, stale]]));
+  assert.equal(arrivedDuringRequest[0], liveUpdate);
 });
