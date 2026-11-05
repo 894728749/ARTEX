@@ -3093,6 +3093,10 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	// Observable heartbeat: native EventSource hides comment-only pings. The UI
+	// needs a liveness signal even while a task is idle, without advancing its
+	// persisted activity cursor or adding transcript rows.
+	fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n")
 	flusher.Flush()
 
 	ctx := r.Context()
@@ -3115,7 +3119,7 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 			since = a.ID
 			sendSSE(a)
 		case <-ping.C:
-			fmt.Fprint(w, ": ping\n\n")
+			fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n")
 			flusher.Flush()
 		}
 	}

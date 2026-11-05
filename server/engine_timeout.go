@@ -92,11 +92,9 @@ func (e *Engine) resetTimeoutRevival(taskID string) {
 }
 
 // stampFirstRun records first_run_at + deadline_at on the FIRST real run (LLM ready)
-// of a timeout task, once per process. No-op when the task has no timeout.
+// once per process. Unlimited tasks still need an honest first-run timestamp;
+// their database deadline remains NULL.
 func (e *Engine) stampFirstRun(t *Task) {
-	if t.TimeoutSeconds <= 0 {
-		return
-	}
 	if _, loaded := e.stamped.LoadOrStore(t.ID, true); loaded {
 		return
 	}

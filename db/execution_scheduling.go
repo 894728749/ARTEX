@@ -12,6 +12,7 @@ import (
 // claimableSQL is shared by direct claims and frontier selection. Missing,
 // deleted or unsuccessful predecessors never silently satisfy a dependency.
 const claimableSQL = `n.kind='intent' AND n.state IN ('open','waiting')
+ AND COALESCE(n.payload->'contract'->>'remote_assignment_pending','false')<>'true'
  AND NOT (n.payload ? 'workflow_wait_id')
  AND (COALESCE(n.payload->'contract'->>'workflow_request_id','0')='0' OR EXISTS(
  SELECT 1 FROM workflow_requests wr JOIN tasks wt ON wt.id=wr.target_task_id
@@ -38,6 +39,9 @@ func (s *ExplorationStore) claimIntent(ctx context.Context, id int64, owner stri
 	}
 	if gated {
 		return nil, nil
+	}
+	if _, err = s.reconcileIntentDependenciesTx(ctx, tx); err != nil {
+		return nil, err
 	}
 	// Serializing on the exploration makes the resource check and admission one
 	// decision, including callers that bypass the in-process worker pool.

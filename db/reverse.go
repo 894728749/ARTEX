@@ -26,10 +26,11 @@ type ReverseArtifact struct {
 }
 
 type ReverseEvidence struct {
-	ArtifactID  int64  `json:"artifact_id"`
-	Locator     string `json:"locator"`
-	Observation string `json:"observation"`
-	ResultPath  string `json:"result_path,omitempty"`
+	ArtifactID   int64  `json:"artifact_id"`
+	Locator      string `json:"locator"`
+	Observation  string `json:"observation"`
+	ResultPath   string `json:"result_path,omitempty"`
+	ResultSHA256 string `json:"result_sha256,omitempty"`
 }
 
 type ReverseConclusion struct {

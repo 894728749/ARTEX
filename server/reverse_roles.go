@@ -57,6 +57,10 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 			roles = []string{"reverse_reviewer"}
 		case "reverse_observe_runtime":
 			roles = []string{"reverse_dynamic", "reverse_reviewer"}
+		case "reverse_get_conclusion", "reverse_read_evidence", "reverse_read_derived", "reverse_inspect_hermes":
+			roles = []string{"reverse_main", "reverse_goals", "reverse_planner", "reverse_static", "reverse_dynamic", "reverse_reviewer"}
+		case "reverse_prepare_apk":
+			roles = []string{"reverse_static", "reverse_dynamic"}
 		}
 		seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + t.Name(), Desc: t.Description(), Schema: t.InputSchema(), Agents: roles})
 	}
@@ -69,6 +73,16 @@ func seedReverseRoles(pg *db.DB, dir string) error {
 		binds, _ := json.Marshal(sd.Agents)
 		if err := pg.SeedTool(sd.Key, sd.Desc, schema, binds); err != nil {
 			return err
+		}
+		if sd.Key == reverseToolPrefix+"complete_intent" {
+			// Preserve operator bindings/defaults while adding the new protocol
+			// field to existing installations (SeedTool never overwrites rows).
+			properties, _ := sd.Schema["properties"].(map[string]any)
+			if field, ok := properties["satisfied_ids"]; ok {
+				if err := pg.EnsureToolSchemaFields(sd.Key, map[string]any{"satisfied_ids": field}, nil); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -113,6 +127,10 @@ func permittedReverseRoleTool(key, name string) bool {
 		return key == "reverse_reviewer"
 	case "reverse_observe_runtime":
 		return key == "reverse_dynamic" || key == "reverse_reviewer"
+	case "reverse_prepare_apk":
+		return key == "reverse_static" || key == "reverse_dynamic"
+	case "reverse_inspect_hermes", "reverse_read_derived":
+		return key == "reverse_static" || key == "reverse_dynamic" || key == "reverse_reviewer"
 	}
 	return true
 }

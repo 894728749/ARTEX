@@ -33,15 +33,83 @@ type EvidenceReference struct {
 }
 
 type IntentResult struct {
-	Outcome     string              `json:"outcome"`
-	Summary     string              `json:"summary"`
-	Evidence    []EvidenceReference `json:"evidence_refs"`
-	Satisfied   []string            `json:"satisfied,omitempty"`
-	Remaining   []string            `json:"remaining,omitempty"`
-	Blocker     string              `json:"blocker,omitempty"`
-	Checkpoint  string              `json:"checkpoint,omitempty"`
-	Attempt     int64               `json:"attempt"`
-	SubmittedAt time.Time           `json:"submitted_at"`
+	Outcome      string              `json:"outcome"`
+	Summary      string              `json:"summary"`
+	Evidence     []EvidenceReference `json:"evidence_refs"`
+	Satisfied    []string            `json:"satisfied,omitempty"`
+	SatisfiedIDs []string            `json:"satisfied_ids,omitempty"`
+	Remaining    []string            `json:"remaining,omitempty"`
+	Blocker      string              `json:"blocker,omitempty"`
+	Checkpoint   string              `json:"checkpoint,omitempty"`
+	Attempt      int64               `json:"attempt"`
+	SubmittedAt  time.Time           `json:"submitted_at"`
+}
+
+type AcceptanceCriterion struct {
+	ID          string `json:"criterion_id"`
+	Description string `json:"description"`
+}
+
+// AcceptanceCriteria derives stable identifiers from the exact normalized
+// acceptance text. Older contracts transparently receive the same derived IDs.
+func AcceptanceCriteria(c WorkContract) []AcceptanceCriterion {
+	out := make([]AcceptanceCriterion, 0, len(c.Acceptance))
+	occurrences := map[string]int{}
+	for _, description := range c.Acceptance {
+		description = strings.TrimSpace(description)
+		occurrences[description]++
+		seed := description
+		if occurrences[description] > 1 {
+			seed += fmt.Sprintf("\noccurrence:%d", occurrences[description])
+		}
+		h := sha256.Sum256([]byte(seed))
+		out = append(out, AcceptanceCriterion{ID: "ac_" + hex.EncodeToString(h[:]), Description: description})
+	}
+	return out
+}
+
+func validateSatisfied(c WorkContract, r IntentResult) error {
+	criteria := AcceptanceCriteria(c)
+	known := make(map[string]bool, len(criteria))
+	for _, item := range criteria {
+		known[item.ID] = true
+	}
+	got := make(map[string]bool)
+	if len(r.SatisfiedIDs) > 0 {
+		if len(r.Satisfied) > 0 {
+			return fmt.Errorf("satisfied_ids 与旧版 satisfied 不能同时提交")
+		}
+		for _, id := range r.SatisfiedIDs {
+			if !known[id] {
+				return fmt.Errorf("未知验收 criterion_id：%s", id)
+			}
+			if got[id] {
+				return fmt.Errorf("重复验收 criterion_id：%s", id)
+			}
+			got[id] = true
+		}
+	} else {
+		// Legacy receipts used the full acceptance text. Keep this path for old
+		// workers and stored contracts while new workers submit fixed IDs.
+		for _, item := range criteria {
+			for _, text := range r.Satisfied {
+				if item.Description == text {
+					got[item.ID] = true
+					break
+				}
+			}
+		}
+	}
+	missing := []string{}
+	for _, item := range criteria {
+		if !got[item.ID] {
+			missing = append(missing, item.ID+" ("+item.Description+")")
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("未满足验收项：%s", strings.Join(missing, "; "))
+	}
+	return nil
 }
 
 func NodeEvidenceVersion(n *Node) string {
@@ -320,17 +388,8 @@ func (s *ExplorationStore) SubmitIntentResult(ctx context.Context, id, attempt i
 		}
 	}
 	if complete {
-		for _, item := range c.Acceptance {
-			found := false
-			for _, v := range r.Satisfied {
-				if v == item {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("未满足验收项：%s", item)
-			}
+		if err := validateSatisfied(c, r); err != nil {
+			return err
 		}
 	}
 	r.Attempt = attempt
@@ -400,16 +459,8 @@ func (s *ExplorationStore) FinishIntentAttempt(ctx context.Context, id, attempt 
 					if len(r.Evidence) == 0 || len(r.Remaining) > 0 {
 						valid = false
 					}
-					for _, item := range c.Acceptance {
-						found := false
-						for _, v := range r.Satisfied {
-							if v == item {
-								found = true
-							}
-						}
-						if !found {
-							valid = false
-						}
+					if validateSatisfied(c, r) != nil {
+						valid = false
 					}
 					if valid {
 						state = "done"

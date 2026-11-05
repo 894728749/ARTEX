@@ -873,6 +873,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if e.isSettling(t.ID) {
 			return
 		}
+		if _, err := t.Store.ReconcileIntentDependencies(ctx); err != nil {
+			log.Printf("[planner] task %s dependency reconciliation: %v", t.ID, err)
+			return
+		}
 		if src == "heartbeat" {
 			if waiting, err := t.Store.PlanningWaitUnchanged(ctx); err == nil && waiting {
 				return

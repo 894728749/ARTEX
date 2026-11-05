@@ -52,6 +52,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { api, sseUrl } from "@/lib/api";
 import { mergeHistoryRefresh } from "@/lib/activity-merge";
+import { openActivityStream, type ActivityStreamState } from "@/lib/activity-stream";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
@@ -639,7 +640,9 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
 
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
-  const [sseLive, setSseLive] = React.useState(false);
+  const [streamState, setStreamState] = React.useState<ActivityStreamState>("connecting");
+  const sseLive = streamState === "live";
+  const [latestSyncAt, setLatestSyncAt] = React.useState(0);
   // Whole-task token total (all agents), polled from the backend aggregate.
   const [taskTokens, setTaskTokens] = React.useState<TokenTotal | null>(null);
   const [sessionTokens, setSessionTokens] = React.useState<Record<string, SessionTokenUsage>>({});
@@ -649,7 +652,7 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
 
   // Refs backing SSE/loading without re-render churn.
   const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
-  const esRef = React.useRef<EventSource | null>(null);
+  const esRef = React.useRef<ReturnType<typeof openActivityStream<Activity>> | null>(null);
   const activeKeyRef = React.useRef(mainSessionKey(0)); // current session key (for SSE dispatch/unread)
   const atBottomRef = React.useRef(true); // transcript pinned to bottom?
   const llmToastSeqRef = React.useRef<Set<number>>(new Set());
@@ -777,6 +780,7 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
         .activityHistory(taskId, key, 0, PAGE)
         .then((r) => {
           if (currentTaskIdRef.current !== taskId || reqTokenRef.current[tokenKey] !== token) return;
+          setLatestSyncAt(Date.now());
           patchStore(key, (s) => {
             // A session-only refresh must not advance the all-task SSE cursor.
             let items = mergeHistoryRefresh(s.items, r.items, requestSnapshot);
@@ -975,7 +979,8 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
     setTaskTokens(null);
     setSessionTokens({});
     setLLMResolutions(null);
-    setSseLive(false);
+    setStreamState("connecting");
+    setLatestSyncAt(0);
     setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
     setMainSegs([{ seq: 0, created_at: "" }]);
     setCurrentSeg(0);
@@ -1025,52 +1030,13 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
     const token = (reqTokenRef.current.mainboot ?? 0) + 1;
     reqTokenRef.current.mainboot = token;
     let bootKey = mainSessionKey(0);
-    // Resolve the main-agent segments first, then load the CURRENT segment's history and
-    // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
-    // frame by session_key (main:<seg>), so switching segments needs no new stream.
-    api
-      .mainSessions(taskId)
-      .then((ms) => {
-        if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
-        const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
-        setMainSegs(segs);
-        setCurrentSeg(ms.current);
-        bootKey = mainSessionKey(ms.current);
-        if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
-        loadingKeysRef.current.add(bootKey);
-        setActiveId(mainSessionId(ms.current));
-        patchStore(bootKey, (s) => ({ ...s, loading: true }));
-        return api.activityHistory(taskId, bootKey, 0, PAGE);
-      })
-      .then((r) => {
-        if (!alive || reqTokenRef.current.mainboot !== token) return;
-        snapshotRef.current = r.snapshotCursor;
-        patchStore(bootKey, (s) => {
-          const items = mergeBySeq(r.items, s.items);
-          return {
-            ...s,
-            items,
-            loaded: true,
-            loading: false,
-            hasMore: r.hasMore,
-            earliestSeq: items.length ? items[0].seq : 0,
-            unread: 0,
-          };
-        });
-        // Open the single task SSE from the snapshot cursor.
-        const es = new EventSource(
-          sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
-        );
-        esRef.current = es;
-        es.onopen = () => setSseLive(true);
-        es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
-        es.onmessage = (e) => {
-          let a: Activity;
-          try {
-            a = JSON.parse(e.data) as Activity;
-          } catch {
-            return; // ignore malformed frame
-          }
+    const connect = () => {
+      if (!alive || esRef.current) return;
+      esRef.current = openActivityStream<Activity>({
+        url: (cursor) => sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${cursor}`),
+        cursor: snapshotRef.current,
+        onState: (state) => { if (alive) setStreamState(state); },
+        onActivity: (a) => {
           if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
             llmToastSeqRef.current.add(a.seq);
             const transition = a.metadata?.llm_transition;
@@ -1120,17 +1086,61 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
             const unread = k === activeK ? 0 : cur.unread + 1;
             return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
           });
-        };
+        },
+      });
+    };
+    // A history request can also hang without rejecting. Bound the startup gate
+    // so the realtime transport still gets a chance to recover independently.
+    const bootTimer = window.setTimeout(connect, 10_000);
+    // Resolve the main-agent segments first, then load the CURRENT segment's history and
+    // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
+    // frame by session_key (main:<seg>), so switching segments needs no new stream.
+    api
+      .mainSessions(taskId)
+      .then((ms) => {
+        if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
+        const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
+        setMainSegs(segs);
+        setCurrentSeg(ms.current);
+        bootKey = mainSessionKey(ms.current);
+        if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
+        loadingKeysRef.current.add(bootKey);
+        setActiveId(mainSessionId(ms.current));
+        patchStore(bootKey, (s) => ({ ...s, loading: true }));
+        return api.activityHistory(taskId, bootKey, 0, PAGE);
+      })
+      .then((r) => {
+        if (!alive || reqTokenRef.current.mainboot !== token) return;
+        snapshotRef.current = r.snapshotCursor;
+        patchStore(bootKey, (s) => {
+          const items = mergeBySeq(r.items, s.items);
+          return {
+            ...s,
+            items,
+            loaded: true,
+            loading: false,
+            hasMore: r.hasMore,
+            earliestSeq: items.length ? items[0].seq : 0,
+            unread: 0,
+          };
+        });
+
       })
       .catch((err) => {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
         if ((err as Error).message === "superseded") return;
         patchStore(bootKey, (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
       })
-      .finally(() => loadingKeysRef.current.delete(bootKey));
+      .finally(() => {
+        window.clearTimeout(bootTimer);
+        loadingKeysRef.current.delete(bootKey);
+        // History failure must not disable the independent realtime transport.
+        if (alive) connect();
+      });
 
     return () => {
       alive = false;
+      window.clearTimeout(bootTimer);
       esRef.current?.close();
       esRef.current = null;
     };
@@ -1361,10 +1371,11 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   const activeKey = keyForSession(active);
   const activeState = store[activeKey];
   React.useEffect(() => {
-    if (!isMain || MOCK) return;
+    if (isSystem || MOCK) return;
+    refreshSessionLatest(activeKey);
     const timer = window.setInterval(() => refreshSessionLatest(activeKey), sseLive ? 10_000 : 3000);
     return () => window.clearInterval(timer);
-  }, [activeKey, isMain, refreshSessionLatest, sseLive]);
+  }, [activeKey, isSystem, refreshSessionLatest, sseLive]);
   // A main turn is serialized per task (chat lock), so "busy" is task-wide: while any
   // main segment is mid-turn the active composer is disabled. Clear it the moment the
   // active session's terminal record (kind='result', or an error) lands, so the input
@@ -1747,12 +1758,15 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                 )}
               </button>
               {!MOCK && (
-                <span
+                <button
                   className={cn(
                     "inline-flex items-center gap-1 text-[10px]",
                     sseLive ? "text-emerald-500" : "text-amber-500",
                   )}
-                  title={sseLive ? "实时连接正常" : "实时连接中断，正在自动重连（历史仍可见）"}
+                  title={sseLive ? "实时连接正常" : latestSyncAt > Date.now() - 15_000 ? "实时通道恢复中，当前会话正在补取同步；点击重试实时连接" : "正在恢复连接；点击立即重试"}
+                  type="button"
+                  onClick={() => esRef.current?.reconnect()}
+                  aria-live="polite"
                 >
                   {sseLive ? (
                     <>
@@ -1762,10 +1776,10 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                   ) : (
                     <>
                       <WifiOffIcon className="size-3" />
-                      重连中
+                      {latestSyncAt > Date.now() - 15_000 ? "补取同步" : streamState === "connecting" ? "连接中" : "重连中"}
                     </>
                   )}
-                </span>
+                </button>
               )}
             </div>
             {taskTokens && (

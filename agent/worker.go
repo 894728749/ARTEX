@@ -400,9 +400,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
+	tc := taskClockFrom(ctx)
+	taskRemaining, hasTaskDeadline := remainingTaskBudget(tc.DeadlineUnix, time.Now())
+	reverseBudgetInfo := calculateReverseBudget(w.runTimeout, tsx.executionContract.BudgetSeconds, taskRemaining, hasTaskDeadline)
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if IsReverse(ctx) {
 		sysBody = reverseSystemKey(agentKey, "worker", "完成当前工作单，服务任务原问题", runDir)
+		sysBody += renderReverseBudget(w.maxTurns, reverseBudgetInfo)
+		sysBody += renderReverseContinuation(intent)
 	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := w.wantConstraints()
@@ -441,16 +446,19 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
-	tc := taskClockFrom(ctx)
-	budget := w.runTimeout
-	if seconds := tsx.executionContract.BudgetSeconds; seconds > 0 && (budget == 0 || time.Duration(seconds)*time.Second < budget) {
-		budget = time.Duration(seconds) * time.Second
-	}
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, budget)
+	// The same calculated minimum is surfaced in the reverse prompt and passed
+	// to the runner, so the displayed effective budget reflects actual limits.
+	maxDur, clamped := reverseBudgetInfo.effective, reverseBudgetInfo.taskBound
 	settle := wrapupSettlement(agentKey, []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask(agentKey, []string{"Bash"}, clamped)
+	}
+	if IsReverse(ctx) {
+		role := tsx.executionContract.ExecutionRole
+		if role == "" {
+			role = agentKey
+		}
+		appendReverseSettlementInstructions(settle, role)
 	}
 	opts := agentcore.Options{
 		Provider:        w.prov,

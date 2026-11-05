@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +44,16 @@ func reverseLocalPath(workDir, relative, requiredPrefix string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	trusted, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return "", err
+	}
+	// Prefix components are platform-owned boundaries, never redirectable by a
+	// material symlink (including one placed on the root directory itself).
+	expected := filepath.Join(trusted, requiredPrefix)
+	if rel, err := filepath.Rel(expected, resolvedRoot); err != nil || rel != "." {
+		return "", errors.New("任务证据根目录存在重定向符号链接")
+	}
 	rel, err = filepath.Rel(resolvedRoot, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", errors.New("证据符号链接超出任务目录")
@@ -53,7 +66,7 @@ func reverseEvidenceCheck(pg *db.DB, taskID int64, workDir string, refs []db.Rev
 		return errors.New("结论至少需要一条工件定位证据")
 	}
 	prefix := filepath.Join("tasks", strconv.FormatInt(taskID, 10), "reverse")
-	for _, ref := range refs {
+	for i, ref := range refs {
 		if strings.TrimSpace(ref.Locator) == "" || strings.TrimSpace(ref.Observation) == "" {
 			return errors.New("证据必须写明定位和直接观察")
 		}
@@ -84,11 +97,20 @@ func reverseEvidenceCheck(pg *db.DB, taskID int64, workDir string, refs []db.Rev
 			var result struct {
 				IsError bool `json:"isError"`
 			}
-			err = json.NewDecoder(f).Decode(&result)
+			h := sha256.New()
+			err = json.NewDecoder(io.TeeReader(f, h)).Decode(&result)
+			if err == nil {
+				_, err = io.Copy(h, f)
+			}
 			_ = f.Close()
 			if err != nil || result.IsError {
 				return errors.New("引用的 REA 结果不是有效成功证据；错误应作为局限/未决项保存")
 			}
+			digest := hex.EncodeToString(h.Sum(nil))
+			if ref.ResultSHA256 != "" && ref.ResultSHA256 != digest {
+				return errors.New("原始证据内容已变化，请提交新版本结论并重新核验")
+			}
+			refs[i].ResultSHA256 = digest
 		}
 	}
 	return nil

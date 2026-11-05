@@ -51,6 +51,7 @@ func executionPlannerGuidance(tools []actool.CoreTool) string {
 		s += " 已有工作因外部故障或预算中断时，先读 execution_result/checkpoint，再用 retry_intent 明确续做一次；失败后等待条件变化，不循环派工。"
 	}
 	s += " prove_goal 必须先 node_detail 分别读取目标和证据，使用目标的 evidence_version 作 goal_version、证据的 evidence_version 作 evidence_version，再核对目标全部条件；严禁仅凭摘要和完成状态盖章。旧提示中要求强制产出意图或直接 goal_met 的条款不再适用。"
+	s += " dependency_failed 时先读取 dependency_failures 清单；续做前置工作，或基于已保存版本证据创建不同合同的替代工作，并说明替代来源。不得复制不带依赖的工作单绕过失败前置。"
 	return s + workflowHelpGuidance(tools)
 }
 
@@ -81,7 +82,8 @@ func executionWorkerGuidance(ts *db.ExplorationStore, n *db.Node, tools []actool
 		s += "\n先用 node_detail 读取 depends_on 的 execution_result 和证据；前置 done 可能是证伪结果，不代表假设成立。"
 	}
 	if hasTool(tools, "complete_intent") {
-		s += "\n停止前必须调用 complete_intent。先 record_fact/report_finding 保存证据，再 node_detail 读取 evidence_version。逐项填写 satisfied；证伪也可完成，但须证据和验收条件成立。未完成则写 incomplete/blocked、remaining、blocker 和 checkpoint。自然语言总结不是验收结果。"
+		criteria, _ := json.Marshal(db.AcceptanceCriteria(c))
+		s += "\n停止前必须调用 complete_intent。先 record_fact/report_finding 保存证据，再 node_detail 读取 evidence_version。使用本合同 criterion_id 填写 satisfied_ids（优先）；旧工作单仍可用完整原文 satisfied。验收清单：" + string(criteria) + "。证伪也可完成，但须证据和验收条件成立。未完成则写 incomplete/blocked、remaining、blocker 和 checkpoint。自然语言总结不是验收结果。"
 	} else {
 		s += "\ncomplete_intent 当前未启用，无法提交结构化验收；在结论中明确说明配置阻塞，不要声称验收完成。"
 	}
@@ -92,7 +94,8 @@ func (t *ToolSet) completeIntent() actool.CoreTool {
 	return t.writeExpTool("complete_intent", "提交当前 Worker 的结构化结果。验收条件和证据版本由系统检查；提交后结束本轮。无法完成也须保存明确阻塞与续做点。", obj(map[string]any{
 		"outcome": map[string]any{"type": "string", "enum": []string{"succeeded", "negative", "reused", "incomplete", "blocked"}}, "summary": str("已验证结果及其边界"),
 		"evidence_refs": map[string]any{"type": "array", "items": obj(map[string]any{"node_id": idp("事实/漏洞节点"), "version": str("node_detail 的 evidence_version")}, "node_id", "version")},
-		"satisfied":     stringItems("逐字列出已满足的合同 acceptance 条目"), "remaining": stringItems("未完成条件"), "blocker": str("阻塞原因"), "checkpoint": str("已做到哪里、下次从哪里继续；避免仅引用本机路径"),
+		"satisfied_ids": stringItems("优先填写合同验收清单中已满足的 criterion_id；必须覆盖每个 ID，不可重复或提交未知 ID"),
+		"satisfied":     stringItems("旧版兼容：逐字列出已满足的完整合同 acceptance 原文；新提交优先使用 satisfied_ids"), "remaining": stringItems("未完成条件"), "blocker": str("阻塞原因"), "checkpoint": str("已做到哪里、下次从哪里继续；避免仅引用本机路径"),
 	}, "outcome", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		if t.ts == nil || t.ownerNode < 1 || t.executionAttempt < 1 {
 			return actool.Errorf("没有正在执行的 Worker 工作单"), nil

@@ -1,7 +1,9 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -276,6 +278,67 @@ func TestExecutionContractResultsAndGoalProof(t *testing.T) {
 	n, _ = s.GetNode(inferred)
 	if _, err = s.ProveGoal(t.Context(), goal, EvidenceReference{inferred, n.EvidenceVersion}, "guess", executionGoalVersion(t, s, goal)); err == nil {
 		t.Fatal("inferred proof accepted")
+	}
+}
+
+func TestExecutionAcceptanceIDsAndLegacyReceipts(t *testing.T) {
+	_, _, s := executionFixture(t)
+	ref := executionEvidence(t, s)
+	c := WorkContract{Acceptance: []string{"至少 observe fixture", "confirm second condition"}}
+	id := executionWork(t, s, "criterion IDs", c)
+	attempt := executionAttempt(t, s, id)
+	criteria := AcceptanceCriteria(c)
+	if len(criteria) != 2 || criteria[0].ID == "" || criteria[0].Description != c.Acceptance[0] {
+		t.Fatalf("bad criteria: %+v", criteria)
+	}
+	// IDs let the worker report completion without copying or paraphrasing the
+	// acceptance sentence (including dropping a leading qualifier).
+	result := IntentResult{Outcome: "succeeded", Summary: "checked", Evidence: []EvidenceReference{ref}, SatisfiedIDs: []string{criteria[0].ID, criteria[1].ID}}
+	if err := s.SubmitIntentResult(t.Context(), id, attempt, result); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := s.FinishIntentAttempt(t.Context(), id, attempt, "done"); err != nil || state != "done" {
+		t.Fatalf("ID result final state=%s err=%v", state, err)
+	}
+
+	for name, ids := range map[string][]string{
+		"unknown":   {criteria[0].ID, "ac_unknown"},
+		"duplicate": {criteria[0].ID, criteria[0].ID, criteria[1].ID},
+	} {
+		t.Run(name, func(t *testing.T) {
+			work := executionWork(t, s, "invalid "+name, c)
+			a := executionAttempt(t, s, work)
+			r := IntentResult{Outcome: "succeeded", Summary: "checked", Evidence: []EvidenceReference{ref}, SatisfiedIDs: ids}
+			if err := s.SubmitIntentResult(t.Context(), work, a, r); err == nil {
+				t.Fatalf("%s ID accepted", name)
+			}
+		})
+	}
+	missing := executionWork(t, s, "missing criterion IDs", c)
+	a := executionAttempt(t, s, missing)
+	r := IntentResult{Outcome: "succeeded", Summary: "checked", Evidence: []EvidenceReference{ref}, SatisfiedIDs: []string{criteria[0].ID}}
+	if err := s.SubmitIntentResult(t.Context(), missing, a, r); err == nil || !strings.Contains(err.Error(), criteria[1].ID) {
+		t.Fatalf("missing list not complete: %v", err)
+	}
+
+	legacy := executionWork(t, s, "legacy receipt", c)
+	a = executionAttempt(t, s, legacy)
+	r = IntentResult{Outcome: "succeeded", Summary: "checked", Evidence: []EvidenceReference{ref}, Satisfied: append([]string(nil), c.Acceptance...)}
+	if err := s.SubmitIntentResult(t.Context(), legacy, a, r); err != nil {
+		t.Fatalf("legacy receipt rejected: %v", err)
+	}
+	if state, err := s.FinishIntentAttempt(t.Context(), legacy, a, "done"); err != nil || state != "done" {
+		t.Fatalf("legacy final state=%s err=%v", state, err)
+	}
+
+	// Settlement independently enforces IDs even if invalid persisted data
+	// bypasses SubmitIntentResult.
+	settlement := executionWork(t, s, "settlement gate", c)
+	a = executionAttempt(t, s, settlement)
+	bad, _ := json.Marshal(IntentResult{Attempt: a, Outcome: "succeeded", Summary: "checked", Evidence: []EvidenceReference{ref}, SatisfiedIDs: []string{criteria[0].ID}})
+	_, _ = s.db.Exec(`UPDATE exploration_nodes SET payload=jsonb_set(payload,'{execution_result}',$2::jsonb) WHERE id=$1`, settlement, string(bad))
+	if state, err := s.FinishIntentAttempt(t.Context(), settlement, a, "done"); err != nil || state != "blocked" {
+		t.Fatalf("invalid persisted result settled as %s: %v", state, err)
 	}
 }
 

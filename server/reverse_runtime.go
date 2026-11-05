@@ -382,7 +382,18 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 				}
 			}
 		}
-		out := map[string]any{"artifacts": items, "conclusions": cs, "task_goal": task.Goal, "runtime_policy": policy, "runtime_environments": environments, "result_directory": resultDir, "material_state": map[bool]string{true: "available", false: "missing"}[len(as) > 0]}
+		conclusionIndexes := make([]map[string]any, 0, len(cs))
+		for _, c := range cs {
+			conclusionIndexes = append(conclusionIndexes, reverseConclusionIndex(c))
+		}
+		out := map[string]any{"artifacts": items, "conclusions": conclusionIndexes, "conclusion_detail_tool": "reverse_get_conclusion(conclusion_id)", "task_goal": task.Goal, "runtime_policy": policy, "runtime_environments": environments, "result_directory": resultDir, "material_state": map[bool]string{true: "available", false: "missing"}[len(as) > 0]}
+		limits := map[string]any{}
+		for _, key := range []string{"reverse_static", "reverse_dynamic", "reverse_reviewer"} {
+			if a, err := pg.GetAgentByKey(key); err == nil && a != nil {
+				limits[key] = map[string]any{"enabled": a.Enabled, "max_turns": a.MaxTurns, "run_seconds": a.RunSecs}
+			}
+		}
+		out["execution_limits"] = limits
 		if profileErr != nil {
 			out["runtime_profile_error"] = profileErr.Error()
 		}
@@ -395,6 +406,8 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 			}
 		}
 		tools = append(tools, reverseEvidenceViewTool(task.ID, workDir))
+		tools = append(tools, reverseReadEvidenceTool(task.ID, workDir))
+		tools = append(tools, reverseMaterialTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseTool("rea_catalog", "查询此工作单独立 REA 会话的真实工具名称和输入 schema；query 用工具名/关键词，limit 最大 10。目录存在不代表外部引擎可用。", reverseObject(map[string]any{"query": reverseString(), "offset": reverseInt(), "limit": reverseInt()}), func(callCtx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Query         string
@@ -472,6 +485,14 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		}))
 		tools = append(tools, reverseConclusionTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseDebugTool(pg, task, info, workDir))
+	}
+	tools = append(tools, reverseConclusionReadTools(pg, task)...)
+	if len(tools) > 0 {
+		// Main/planner/goals may read evidence and conclusions; execution tools
+		// remain scoped to worker roles above.
+		if role == "reverse_main" || role == "reverse_goals" || role == "reverse_planner" {
+			tools = append(tools, reverseReadEvidenceTool(task.ID, workDir))
+		}
 	}
 	permitted := tools[:0]
 	for _, t := range tools {

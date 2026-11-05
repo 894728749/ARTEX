@@ -247,6 +247,8 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool, workDirs ...stri
 			required = []string{"goal_version", "evidence_version", "reason"}
 		case "record_fact":
 			fields = []string{"planning_impact"}
+		case "complete_intent":
+			fields = []string{"satisfied_ids"}
 		}
 		if len(fields) > 0 {
 			props := map[string]any{}
