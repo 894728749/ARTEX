@@ -1538,3 +1538,109 @@ DO $$ BEGIN
   INSERT INTO settings(key,value) VALUES('finding_review_watermark_v1','true') ON CONFLICT DO NOTHING;
  END IF;
 END $$;
+
+-- Team collaboration data plane. Credentials and pairing/device secrets are
+-- stored only as password hashes or SHA-256 token digests. Runtime snapshots
+-- are explicit JSON supplied by the trusted server, never arbitrary SQL.
+CREATE TABLE IF NOT EXISTS teams (
+ id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 200),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS team_members (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ login TEXT NOT NULL CHECK(length(login) BETWEEN 1 AND 160), password_hash TEXT NOT NULL CHECK(length(password_hash)>0),
+ revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(team_id,login), UNIQUE(id,team_id)
+);
+CREATE TABLE IF NOT EXISTS team_tasks (
+ team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(team_id,task_id)
+);
+CREATE TABLE IF NOT EXISTS team_task_permissions (
+ team_id BIGINT NOT NULL, task_id BIGINT NOT NULL, member_id BIGINT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+ permission TEXT NOT NULL CHECK(permission IN ('read','execute','review','manage')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(team_id,task_id,member_id,permission),
+ FOREIGN KEY(team_id,task_id) REFERENCES team_tasks(team_id,task_id) ON DELETE CASCADE,
+ FOREIGN KEY(member_id,team_id) REFERENCES team_members(id,team_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS team_devices (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ owner_member_id BIGINT NOT NULL,
+ name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 160), token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash)=64),
+ capabilities JSONB NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(capabilities) IN ('object','array')),
+ revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(id,team_id),
+ FOREIGN KEY(owner_member_id,team_id) REFERENCES team_members(id,team_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS team_device_pairings (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ member_id BIGINT NOT NULL,
+ token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash)=64), expires_at TIMESTAMPTZ NOT NULL,
+ consumed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ FOREIGN KEY(member_id,team_id) REFERENCES team_members(id,team_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_team_pairings_expiry ON team_device_pairings(expires_at) WHERE consumed_at IS NULL;
+CREATE TABLE IF NOT EXISTS team_execution_assignments (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL, task_id BIGINT NOT NULL, intent_id BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+ member_id BIGINT NOT NULL,
+ device_id BIGINT NOT NULL REFERENCES team_devices(id) ON DELETE RESTRICT,
+ epoch BIGINT NOT NULL CHECK(epoch>0), attempt BIGINT NOT NULL CHECK(attempt>0), resource_key TEXT NOT NULL DEFAULT '',
+ lease_until TIMESTAMPTZ NOT NULL, state TEXT NOT NULL CHECK(state IN ('assigned','claimed','running','completed','cancelled','expired')),
+ config_snapshot JSONB NOT NULL CHECK(jsonb_typeof(config_snapshot) IN ('object','array')),
+ input_snapshot JSONB NOT NULL CHECK(jsonb_typeof(input_snapshot) IN ('object','array')),
+ result JSONB, review_member_id BIGINT REFERENCES team_members(id) ON DELETE SET NULL,
+ review_decision TEXT CHECK(review_decision IN ('accept','reject')), review_note TEXT NOT NULL DEFAULT '', reviewed_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ,
+ FOREIGN KEY(team_id,task_id) REFERENCES team_tasks(team_id,task_id) ON DELETE CASCADE,
+ FOREIGN KEY(member_id,team_id) REFERENCES team_members(id,team_id) ON DELETE RESTRICT,
+ FOREIGN KEY(device_id,team_id) REFERENCES team_devices(id,team_id) ON DELETE RESTRICT,
+ UNIQUE(intent_id,epoch)
+);
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS review_member_id BIGINT REFERENCES team_members(id) ON DELETE SET NULL;
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS review_decision TEXT;
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT '';
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_active_intent_assignment ON team_execution_assignments(intent_id) WHERE state IN ('assigned','claimed','running');
+DROP INDEX IF EXISTS uq_team_active_member_resource;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_active_team_resource ON team_execution_assignments(team_id,resource_key) WHERE state IN ('assigned','claimed','running') AND resource_key<>'';
+CREATE INDEX IF NOT EXISTS idx_team_assignment_poll ON team_execution_assignments(device_id,state,created_at) WHERE state='assigned';
+CREATE INDEX IF NOT EXISTS idx_team_assignment_lease ON team_execution_assignments(lease_until) WHERE state IN ('assigned','claimed','running');
+CREATE TABLE IF NOT EXISTS team_resources (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL, task_id BIGINT NOT NULL,
+ resource_key TEXT NOT NULL CHECK(length(resource_key) BETWEEN 1 AND 200), value JSONB NOT NULL,
+ owner_member_id BIGINT REFERENCES team_members(id) ON DELETE SET NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(team_id,task_id,resource_key),
+ FOREIGN KEY(team_id,task_id) REFERENCES team_tasks(team_id,task_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS team_command_receipts (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ member_id BIGINT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+ command_id TEXT NOT NULL CHECK(length(command_id) BETWEEN 1 AND 200), payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),
+ result JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(team_id,member_id,command_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_team_history (
+ id BIGSERIAL PRIMARY KEY,
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 100),
+ source_key TEXT NOT NULL CHECK(length(source_key) BETWEEN 1 AND 500),
+ snapshot JSONB NOT NULL CHECK(jsonb_typeof(snapshot)='object'),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(task_id,kind,source_key)
+);
+CREATE INDEX IF NOT EXISTS idx_task_team_history_task ON task_team_history(task_id,kind,created_at,id);
+
+ALTER TABLE team_devices ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS team_dispatch_queue (
+ id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL, task_id BIGINT NOT NULL,
+ intent_id BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+ requested_by BIGINT NOT NULL, request JSONB NOT NULL,
+ state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','assigned','cancelled','blocked')),
+ assignment_id BIGINT REFERENCES team_execution_assignments(id) ON DELETE SET NULL,
+ last_error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ expires_at TIMESTAMPTZ NOT NULL DEFAULT now()+interval '24 hours',
+ last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch',
+ FOREIGN KEY(team_id,task_id) REFERENCES team_tasks(team_id,task_id) ON DELETE CASCADE
+);
+ALTER TABLE team_dispatch_queue ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_queued_intent ON team_dispatch_queue(intent_id) WHERE state='queued';

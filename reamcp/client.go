@@ -48,12 +48,25 @@ type envelope struct {
 }
 
 func New(ctx context.Context, command string, args []string, dir string, env []string, progress func(string)) (*Client, error) {
+	return newWithEnvironment(ctx, command, args, dir, append(os.Environ(), env...), progress)
+}
+
+// NewIsolated starts a private MCP session with exactly the supplied
+// environment. New keeps its inherited-environment behavior for existing
+// callers; device nodes should use NewIsolated with an explicit allowlist.
+func NewIsolated(ctx context.Context, command string, args []string, dir string, env []string, progress func(string)) (*Client, error) {
+	environment := make([]string, len(env))
+	copy(environment, env)
+	return newWithEnvironment(ctx, command, args, dir, environment, progress)
+}
+
+func newWithEnvironment(ctx context.Context, command string, args []string, dir string, environment []string, progress func(string)) (*Client, error) {
 	if command == "" {
 		return nil, errors.New("REA command is not configured")
 	}
 	cmd := exec.Command(command, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = environment
 	configureProcess(cmd)
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -228,3 +241,6 @@ func (c *Client) Close() error {
 	}
 	return nil
 }
+
+// Done closes when the owned stdio process exits or the client is closed.
+func (c *Client) Done() <-chan struct{} { return c.closed }

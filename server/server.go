@@ -233,6 +233,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			log.Printf("[workflow] seed: %v", err)
 		}
 		go s.workflowRequestLoop()
+		go s.runTeamDispatcher(s.ctx)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
@@ -675,9 +676,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
+	mux.HandleFunc("POST /api/auth/team-login", s.teamLogin)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/teams", s.teamList)
+	mux.HandleFunc("POST /api/teams", s.teamCreate)
+	mux.HandleFunc("GET /api/teams/{team}/members", s.teamMembers)
+	mux.HandleFunc("POST /api/teams/{team}/members", s.teamMemberCreate)
+	mux.HandleFunc("DELETE /api/teams/{team}/members/{member}", s.teamMemberRevoke)
+	mux.HandleFunc("POST /api/teams/{team}/tasks/{task}/permissions", s.teamPermissionGrant)
+	mux.HandleFunc("DELETE /api/teams/{team}/tasks/{task}/permissions/{member}/{permission}", s.teamPermissionRevoke)
+	mux.HandleFunc("GET /api/teams/{team}/workspace", s.teamWorkspace)
+	mux.HandleFunc("POST /api/teams/{team}/pairings", s.teamPairingCreate)
+	mux.HandleFunc("DELETE /api/teams/{team}/devices/{device}", s.teamDeviceRevoke)
+	mux.HandleFunc("POST /api/collaboration/pair", s.teamDevicePair)
+	mux.HandleFunc("GET /api/collaboration/device", s.teamDeviceStatus)
+	s.teamExecutionRoutes(mux)
 	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)

@@ -20,20 +20,20 @@ func (d *DB) AdvanceGoalFinalization(ctx context.Context, taskID int64, begin bo
 	if err = tx.QueryRowContext(ctx, `SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&exp); err != nil {
 		return "", err
 	}
-	s := d.Exploration(exp)
-	if err = s.lockExploration(ctx, tx); err != nil {
-		return "", err
-	}
 	var status string
 	var paused bool
 	if err = tx.QueryRowContext(ctx, `SELECT status,paused FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&status, &paused); err != nil {
+		return "", err
+	}
+	s := d.Exploration(exp)
+	if err = s.lockExploration(ctx, tx); err != nil {
 		return "", err
 	}
 	if paused || IsTerminal(status) {
 		return status, nil
 	}
 	var pending bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, taskID).Scan(&pending); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending') OR EXISTS(SELECT 1 FROM team_execution_assignments WHERE task_id=$1 AND (state IN ('assigned','claimed','running') OR (state='completed' AND review_decision IS NULL))) OR EXISTS(SELECT 1 FROM team_dispatch_queue WHERE task_id=$1 AND state='queued')`, taskID).Scan(&pending); err != nil {
 		return "", err
 	}
 	if pending {

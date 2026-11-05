@@ -81,6 +81,14 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM team_resources WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	// These read-only snapshots are already durably stored in the checked
+	// archive package. Restore them with the rest of the task, not into hot storage.
+	if _, err := tx.Exec(`DELETE FROM task_team_history WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
@@ -287,6 +295,14 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
+	}
+	if err := restoreTaskTeamHistory(tx, taskID, snapshot.Tables["team_history_sources"]); err != nil {
+		return nil, fmt.Errorf("restore team history: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='paused',owner=NULL,
+payload=payload #- '{contract,remote_assignment_pending}' #- '{contract,remote_device_id}' #- '{contract,remote_epoch}' #- '{contract,remote_dispatch_pending}' #- '{contract,remote_dispatch_id}'
+WHERE exploration_id=$1 AND (payload->'contract'->>'remote_assignment_pending'='true' OR payload->'contract'->>'remote_dispatch_pending'='true')`, expID); err != nil {
+		return nil, err
 	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)

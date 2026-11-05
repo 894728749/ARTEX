@@ -152,6 +152,7 @@ type Engine struct {
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
 	resolveIntentWorker  func(*Task, *db.Node) (*agent.Worker, error)
+	executionBackend     ExecutionBackend
 	beforeAgentRun       func(*Task, string, int64)
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
@@ -191,6 +192,7 @@ func (e *Engine) Pause(taskID string, cause error) {
 	}
 	e.liveMu.Unlock()
 	e.cancelExec(taskID, cause)
+	e.cancelTeamExecutions(taskID)
 }
 
 // BeginDelete installs an execution barrier before task data/files are removed.
@@ -206,6 +208,7 @@ func (e *Engine) BeginDelete(taskID string) bool {
 	e.paused.Store(taskID, true)
 	e.deleteMu.Unlock()
 	e.cancelExec(taskID, agent.AbortTaskDeleted)
+	e.cancelTeamExecutions(taskID)
 	e.liveMu.Lock()
 	for c, id := range e.liveRuns {
 		if id == taskID {
@@ -1052,7 +1055,6 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		worker = selected
 	}
-	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
@@ -1125,11 +1127,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
-	if hasChatMessage {
-		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
-	} else {
-		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
-	}
+	run := LocalExecution{Executor: worker, Name: name, TaskID: wTaskID, Assets: e.m.assets, Store: t.Store, Intent: intent, Hooks: hooks, Emit: emit, Enrich: e.m.enrich, NotifyFinding: t.NotifyFinding, RequestID: requestID, Message: message}
+	reason, wrote, err = e.executeLocalIntent(workCtx, run)
 	e.EndLLMCall(t.ID)
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
@@ -1144,11 +1143,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
 		e.BeginLLMCall(t.ID)
-		if hasChatMessage {
-			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
-		} else {
-			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
-		}
+		reason, wrote, err = e.executeLocalIntent(workCtx, run)
 		e.EndLLMCall(t.ID)
 	}
 	// Capture kill state before detachWork cancels workCtx. kill = this work's

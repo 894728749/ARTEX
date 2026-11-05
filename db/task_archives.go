@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 3
+	TaskArchiveFormatVersion       = 4
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -244,6 +244,13 @@ WHERE t.id=$1 AND t.deleted_at IS NULL FOR UPDATE OF t`, taskID).Scan(
 	}
 	if !paused && !IsTerminal(status) {
 		return nil, ErrTaskArchiveIneligible
+	}
+	var remoteRunning bool
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM team_execution_assignments WHERE task_id=$1 AND state IN ('claimed','running') AND lease_until>now())`, taskID).Scan(&remoteRunning); err != nil {
+		return nil, err
+	}
+	if remoteRunning {
+		return nil, fmt.Errorf("协作设备仍在收尾，请等待当前工具回传后归档")
 	}
 	var workflowPending bool
 	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, taskID).Scan(&workflowPending); err != nil {
@@ -594,6 +601,12 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_constraints", `SELECT * FROM task_constraints WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"activity", `SELECT * FROM activity WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"task_relations", `SELECT * FROM task_relations WHERE task_id=$1 ORDER BY created_at,source_task_id`, []any{taskID}},
+		{"team_history_sources", `WITH live AS (SELECT 'team_task'::text AS kind,tt.team_id::text AS source_key,jsonb_build_object('team_id',tt.team_id,'team_name',t.name,'created_at',tt.created_at) AS snapshot FROM team_tasks tt JOIN teams t ON t.id=tt.team_id WHERE tt.task_id=$1
+UNION ALL SELECT 'team_permission',p.team_id::text||':'||p.member_id::text||':'||p.permission,jsonb_build_object('team_id',p.team_id,'team_name',t.name,'member_id',p.member_id,'member_login',m.login,'member_revoked_at',m.revoked_at,'permission',p.permission,'created_at',p.created_at) FROM team_task_permissions p JOIN teams t ON t.id=p.team_id JOIN team_members m ON m.id=p.member_id WHERE p.task_id=$1
+UNION ALL SELECT 'team_assignment',a.id::text,jsonb_build_object('assignment_id',a.id,'team_id',a.team_id,'team_name',t.name,'task_id',a.task_id,'intent_id',a.intent_id,'member_id',a.member_id,'member_login',m.login,'member_revoked_at',m.revoked_at,'device_id',a.device_id,'device_name',d.name,'device_revoked_at',d.revoked_at,'epoch',a.epoch,'attempt',a.attempt,'resource_key',a.resource_key,'state',a.state,'lease_until',a.lease_until,'config_snapshot',a.config_snapshot,'input_snapshot',a.input_snapshot,'result',a.result,'review_member_id',a.review_member_id,'review_member_login',rm.login,'review_member_revoked_at',rm.revoked_at,'review_decision',a.review_decision,'review_note',a.review_note,'reviewed_at',a.reviewed_at,'created_at',a.created_at,'started_at',a.started_at,'finished_at',a.finished_at) FROM team_execution_assignments a JOIN teams t ON t.id=a.team_id JOIN team_members m ON m.id=a.member_id JOIN team_devices d ON d.id=a.device_id LEFT JOIN team_members rm ON rm.id=a.review_member_id WHERE a.task_id=$1
+UNION ALL SELECT 'team_resource',r.team_id::text||':'||r.resource_key,jsonb_build_object('team_id',r.team_id,'team_name',t.name,'resource_key',r.resource_key,'value',r.value,'owner_member_id',r.owner_member_id,'owner_login',m.login,'owner_revoked_at',m.revoked_at,'created_at',r.created_at,'updated_at',r.updated_at) FROM team_resources r JOIN teams t ON t.id=r.team_id LEFT JOIN team_members m ON m.id=r.owner_member_id WHERE r.task_id=$1
+UNION ALL SELECT 'team_dispatch',q.id::text,to_jsonb(q) FROM team_dispatch_queue q WHERE q.task_id=$1
+) SELECT * FROM live UNION ALL SELECT h.kind,h.source_key,h.snapshot FROM task_team_history h WHERE h.task_id=$1 AND NOT EXISTS(SELECT 1 FROM live l WHERE l.kind=h.kind AND l.source_key=h.source_key) ORDER BY kind,source_key`, []any{taskID}},
 		{"task_asset_links", `SELECT * FROM task_asset_links WHERE task_id=$1 ORDER BY asset_id`, []any{taskID}},
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},

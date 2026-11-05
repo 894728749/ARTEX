@@ -1,0 +1,48 @@
+{
+  "coordinator_url": "https://coordinator.example.invalid",
+  "server_name": "coordinator.example.invalid",
+  "ca_file": "",
+  "spki_pin": "",
+  "lan_addresses": [
+    "192.0.2.20:443"
+  ],
+  "relay_url": "wss://relay.example.invalid/relay",
+  "relay_room": "replace-with-room-id",
+  "relay_peer": "replace-with-peer-id",
+  "relay_secret_env": "ARTEX_RELAY_SECRET",
+  "execution": {
+    "roles": {
+      "reverse_static": {
+        "model": "local_static_model",
+        "capabilities": [
+          "asset_lookup"
+        ]
+      }
+    },
+    "models": {
+      "local_static_model": {
+        "endpoint": "https://model.example.invalid/v1",
+        "api_key_env": "ARTEX_REVERSE_STATIC_API_KEY",
+        "model": "replace-with-model-name",
+        "format": "openai"
+      }
+    },
+    "commands": {},
+    "mcp_servers": {
+      "asset_catalog": {
+        "command": "/usr/local/bin/replace-with-mcp-server",
+        "args": [],
+        "env_allowlist": []
+      }
+    },
+    "mcp_tools": {
+      "asset_lookup": {
+        "server": "asset_catalog",
+        "tool": "replace-with-exact-tool-name",
+        "read_only": true
+      }
+    },
+    "work_dir": "/var/lib/artex-node/work",
+    "outbox_dir": "/var/lib/artex-node/outbox"
+  }
+}

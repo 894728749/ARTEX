@@ -124,6 +124,16 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 			h.ServeHTTP(w, r)
 			return
 		}
+		if p == "/api/collaboration/pair" && r.Method == http.MethodPost {
+			h.ServeHTTP(w, r)
+			return
+		}
+		if p == "/api/collaboration/device" || strings.HasPrefix(p, "/api/collaboration/device/") {
+			if request, ok := s.authenticateTeamDeviceRequest(w, r); ok {
+				h.ServeHTTP(w, request)
+			}
+			return
+		}
 		tok := extractToken(r)
 		if tok == "" {
 			writeErr(w, 401, "未授权")
@@ -131,6 +141,9 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 		}
 		if !verifyJWT(tok, s.jwtKey) {
 			writeErr(w, 401, "token 无效或已过期")
+			return
+		}
+		if !s.authorizeTeamPrincipal(w, r) {
 			return
 		}
 		h.ServeHTTP(w, r)
@@ -215,6 +228,10 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if !verifyJWT(extractToken(r), s.jwtKey) {
 		writeErr(w, 401, "未授权")
+		return
+	}
+	if principal, ok := s.teamPrincipal(r); !ok || !principal.Admin {
+		writeErr(w, 403, "仅管理员可以修改系统密码")
 		return
 	}
 	var req struct {

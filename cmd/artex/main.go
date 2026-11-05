@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/collab"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
@@ -52,9 +54,15 @@ func main() {
 
 func run() int {
 	var (
-		addr    = flag.String("addr", ":8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
-		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		addr      = flag.String("addr", ":8787", "HTTP listen address")
+		dataDir   = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
+		proxy     = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		tlsCert   = flag.String("tls-cert", "", "team coordinator TLS certificate PEM")
+		tlsKey    = flag.String("tls-key", "", "team coordinator TLS private key PEM")
+		teamAddr  = flag.String("team-addr", "", "optional separate TLS listener for team devices")
+		relayURL  = flag.String("relay-url", "", "optional wss relay URL")
+		relayRoom = flag.String("relay-room", "", "relay room")
+		relayPeer = flag.String("relay-peer", "", "stable coordinator relay peer identity")
 	)
 	flag.Parse()
 
@@ -94,6 +102,30 @@ func run() int {
 	defer stop()
 	ctx, shutdown := shutdownContext(sigCtx)
 	defer shutdown(agent.AbortShutdown)
+	if (*tlsCert == "") != (*tlsKey == "") || ((*relayURL != "" || *teamAddr != "") && *tlsCert == "") {
+		log.Print("TLS certificate and key are required together; relay requires TLS")
+		return 1
+	}
+	var certificate tls.Certificate
+	if *tlsCert != "" {
+		var err error
+		certificate, err = tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Print("could not load coordinator TLS certificate/key")
+			return 1
+		}
+	}
+	dsn, _, err := config.PostgresDSN()
+	if err != nil {
+		log.Print("database configuration unavailable")
+		return 1
+	}
+	coordinator, err := server.AcquireCoordinatorLock(ctx, dsn)
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	defer coordinator.Close()
 
 	mgr, err := server.NewManager(*dataDir, *proxy)
 	if err != nil {
@@ -118,10 +150,40 @@ func run() int {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if *tlsCert != "" {
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}
+	}
+	var teamSrv *http.Server
+	if *teamAddr != "" {
+		teamSrv = &http.Server{Addr: *teamAddr, Handler: srv.Handler(), TLSConfig: httpSrv.TLSConfig, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := teamSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Print("team listener stopped")
+				shutdown(agent.AbortShutdown)
+			}
+		}()
+	}
+	if *relayURL != "" {
+		secret := os.Getenv("ARTEX_RELAY_SECRET")
+		if secret == "" || *relayRoom == "" || *relayPeer == "" {
+			log.Print("relay room, peer and ARTEX_RELAY_SECRET are required")
+			return 1
+		}
+		go func() {
+			if err := collab.ServeRelayHTTP(ctx, collab.RelayConfig{URL: *relayURL, Room: *relayRoom, Peer: *relayPeer, Secret: secret}, httpSrv.TLSConfig, srv.Handler()); err != nil && ctx.Err() == nil {
+				log.Print("relay listener stopped")
+				shutdown(agent.AbortShutdown)
+			}
+		}()
+	}
 
 	go func() {
 		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, *addr, *dataDir, mgr.Workers())
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		serve := httpSrv.ListenAndServe
+		if *tlsCert != "" && *teamAddr == "" {
+			serve = func() error { return httpSrv.ListenAndServeTLS("", "") }
+		}
+		if err := serve(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("serve: %v", err)
 		}
 	}()
@@ -132,6 +194,10 @@ func run() int {
 	code := 0
 	select {
 	case <-ctx.Done():
+	case <-coordinator.Lost:
+		log.Print("coordinator ownership lost; stopping execution")
+		code = 1
+		shutdown(agent.AbortShutdown)
 	case <-server.RestartRequested():
 		code = selfupdate.ExitRestart
 		shutdown(agent.AbortShutdown)
@@ -141,6 +207,9 @@ func run() int {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	if teamSrv != nil {
+		_ = teamSrv.Shutdown(shutdownCtx)
+	}
 	return code
 }
 

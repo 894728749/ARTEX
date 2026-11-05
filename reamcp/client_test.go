@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"strings"
 	"testing"
@@ -28,18 +29,109 @@ func TestREAHelperProcess(t *testing.T) {
 		var result any
 		switch req.Method {
 		case "initialize":
-			result = map[string]any{"serverInfo": map[string]any{"version": "fixture"}}
+			result = map[string]any{"serverInfo": map[string]any{"version": os.Getenv("ARTEX_REA_ISOLATED_SECRET")}}
 		case "tools/list":
-			result = map[string]any{"tools": []any{map[string]any{"name": "inspect", "inputSchema": map[string]any{"type": "object"}}}}
+			if os.Getenv("ARTEX_REA_INCLUDE_TOOLS") == "1" {
+				result = map[string]any{"tools": []any{
+					map[string]any{"name": "inspect", "description": "inspect fixture", "inputSchema": map[string]any{"type": "object"}},
+					map[string]any{"name": "mutate", "description": "mutate fixture", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}}},
+					map[string]any{"name": "hidden", "description": "not selected", "inputSchema": map[string]any{"type": "object"}},
+				}}
+			} else {
+				result = map[string]any{"tools": []any{map[string]any{"name": "inspect", "inputSchema": map[string]any{"type": "object"}}}}
+			}
 		case "tools/call":
 			if req.Params.Name == "wait" {
 				time.Sleep(10 * time.Second)
 			}
-			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": "preview"}}, "structuredContent": map[string]any{"evidence_id": "fixture-123", "raw_result": strings.Repeat("x", 40000)}}
+			isError := req.Params.Name == "failure"
+			result = map[string]any{"isError": isError, "content": []any{map[string]any{"type": "text", "text": "preview"}}, "structuredContent": map[string]any{"evidence_id": "fixture-123", "raw_result": strings.Repeat("x", 40000)}}
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
 	}
 	os.Exit(0)
+}
+
+func TestREAIsolatedEnvironmentAndMCPErrorFlag(t *testing.T) {
+	t.Setenv("ARTEX_REA_ISOLATED_SECRET", "must-not-inherit")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	c, err := NewIsolated(ctx, os.Args[0], []string{"-test.run=TestREAHelperProcess"}, dir, []string{"ARTEX_REA_HELPER=1", "ARTEX_REA_INCLUDE_TOOLS=1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.Version != "" {
+		t.Fatalf("isolated client inherited ambient secret: %q", c.Version)
+	}
+	tools, err := c.Tools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 || tools[0].Description != "inspect fixture" || tools[1].InputSchema["type"] != "object" {
+		t.Fatalf("MCP tool descriptors were not retained: %#v", tools)
+	}
+	got, err := c.Call(ctx, "failure", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"isError":true`) {
+		t.Fatalf("MCP isError flag missing: %s", got)
+	}
+}
+
+func TestREANewKeepsInheritedEnvironmentBehavior(t *testing.T) {
+	t.Setenv("ARTEX_REA_ISOLATED_SECRET", "expected-inherited-value")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := New(ctx, os.Args[0], []string{"-test.run=TestREAHelperProcess"}, t.TempDir(), []string{"ARTEX_REA_HELPER=1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.Version != "expected-inherited-value" {
+		t.Fatalf("legacy New stopped inheriting environment: %q", c.Version)
+	}
+}
+
+func TestREAEmptyEnvironmentHelper(t *testing.T) {
+	if flag.Lookup("test.run").Value.String() != "TestREAEmptyEnvironmentHelper" {
+		return
+	}
+	s := bufio.NewScanner(os.Stdin)
+	for s.Scan() {
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(s.Bytes(), &req) != nil || req.ID == 0 {
+			continue
+		}
+		var result any
+		switch req.Method {
+		case "initialize":
+			result = map[string]any{"serverInfo": map[string]any{"version": os.Getenv("ARTEX_REA_EMPTY_ENV_SECRET")}}
+		case "tools/list":
+			result = map[string]any{"tools": []any{}}
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}
+	os.Exit(0)
+}
+
+func TestREAIsolatedNilEnvironmentDoesNotInherit(t *testing.T) {
+	t.Setenv("ARTEX_REA_EMPTY_ENV_SECRET", "must-not-be-inherited")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewIsolated(ctx, os.Args[0], []string{"-test.run=TestREAEmptyEnvironmentHelper"}, t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.Version != "" {
+		t.Fatalf("nil isolated environment inherited a parent secret: %q", c.Version)
+	}
 }
 
 func TestREARetainsStructuredEvidenceAndCancels(t *testing.T) {
