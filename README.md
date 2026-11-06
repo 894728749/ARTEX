@@ -7,7 +7,9 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
-📦 **本仓库在 ARTEX 0.3.15 源码备份基础上继续维护。旧 Docker 镜像源可能不可用，请按源码构建。**
+📦 **源码仓库：** [cyy081021/ARTEX](https://github.com/cyy081021/ARTEX) · **ARTEX Releases：** [正式版本发布页](https://github.com/cyy081021/ARTEX/releases)
+
+本仓库在 ARTEX 0.3.15 源码备份基础上继续维护。`artex-*` 标签保留源码里程碑；带下载包的正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
 
 </div>
 
@@ -100,7 +102,7 @@ cd ARTEX
 
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → 从 `ghcr.io/cyy081021/artex` 拉取镜像并启动。若首次发布后 GHCR 镜像显示为私有，请在 GitHub Packages 将该包可见性设为 **Public**，否则其他用户无法匿名拉取。
 - **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
 
 装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
@@ -111,9 +113,11 @@ cd ARTEX
 git clone https://github.com/cyy081021/ARTEX.git
 cd ARTEX
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
+docker compose up -d          # 拉取 ghcr.io/cyy081021/artex + postgres
 # → http://localhost:8787
 ```
+
+首次发布后若 GHCR 包默认设为私有，请在 GitHub Packages 中将 `artex` 包的可见性改为 **Public**，以便用户无需登录即可拉取。
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
@@ -122,17 +126,16 @@ docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
 `/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
 `Authorization=Bearer <token>` 填写。
 
-### 方式三：下载预编译二进制（Releases）
+### 方式三：预编译二进制（Releases）
 
-到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
+到 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 下载对应平台的 zip。正式包命名为 `artex-<版本>-<系统>-<架构>.zip`，同一 Release 附带 `SHA256SUMS`。只有源码标签、没有这些资产时，请使用源码构建。
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
 ./start.sh                           # → http://localhost:8787
 ```
 
-> 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
-> 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
+请用包内的 `start.sh` / `start.bat` 启动，以便在线更新完成换装后重新拉起进程。后台运行可用 `nohup ./start.sh >artex.log 2>&1 &`。
 
 ### 方式四：从源码编译单二进制
 
@@ -177,7 +180,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 - **失败不会留下坏程序**：校验或冒烟不通过就丢弃暂存件、继续跑当前版本；换装后的新版若连续 3 次启动失败，会自动回滚到 `artex.old`（失败的那个留作 `artex.failed` 供排查）。
 - **随时可回退**：上一版本保留为 `artex.old`，卡片上有「回滚到上一版本」。注意数据库结构不会回退。
 - **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
-- **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
+- **开发构建不给更新**：版本号是 `dev`、`artex-*` 或带本地后缀时禁用。首次从旧发布源/本地构建迁移时，请手动安装本仓库正式包或重新构建；后续 `vX.Y.Z` 正式包可在线更新。
 - **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
 - 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
 
@@ -198,7 +201,7 @@ cd ARTEX
 ```bash
 cd ARTEX
 git pull                       # 更新 compose / 脚本（可选）
-# 指定版本：在 .env 设 ARTEX_TAG=v0.2.0；不设则用 latest
+# 指定正式版本：在 .env 设 ARTEX_TAG=v0.4.0；不设则用 latest（v0.4.0 发布后可用）
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
@@ -206,12 +209,7 @@ docker image prune -f          # 清理旧镜像（可选）
 
 ### 方式四：预编译二进制（Releases）
 
-到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
-
-```bash
-cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
-./start.sh
-```
+到 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 下载新版本 zip，校验 `SHA256SUMS` 后停掉旧进程，覆盖程序和随包资源，保留自己的 `config.json` 与 `data/`，再通过 `start.sh` / `start.bat` 启动。数据库迁移仍在启动时执行。
 
 ### 方式五：从源码编译
 

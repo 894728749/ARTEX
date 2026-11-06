@@ -14,10 +14,17 @@ ask(){  local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; echo "${a:-$d}"
 
 # ── 可选：同步仓库到最新代码（compose/脚本/本地编译源码都靠它更新）───────
 sync_repo(){
-  [ -d .git ] && command -v git >/dev/null 2>&1 || { warn "非 git 工作副本，跳过 git pull"; return; }
-  [ "$(ask '拉取最新代码 (git pull --ff-only)? (y/n)' y)" = y ] || return
+  [ -e .git ] && command -v git >/dev/null 2>&1 || { warn "非 git 工作副本，跳过 git pull"; return; }
+  [ "$(ask '拉取最新代码 (git pull --ff-only)? (y/n)' y)" = y ] || return 0
+  local origin
+  origin="$(git remote get-url origin 2>/dev/null || true)"
+  if [[ "${origin,,}" =~ ^https?://github\.com/autumn-27/artex(\.git)?/?$ || "${origin,,}" =~ ^git@github\.com:autumn-27/artex(\.git)?$ || "${origin,,}" =~ ^ssh://git@github\.com/autumn-27/artex(\.git)?/?$ ]]; then
+    info "检测到已删除的 Autumn-27/ARTEX origin，迁移到 cyy081021/ARTEX…"
+    git remote set-url origin https://github.com/cyy081021/ARTEX.git \
+      || die "无法迁移 origin，请手动设置为 https://github.com/cyy081021/ARTEX.git 后重试"
+  fi
   if ! git pull --ff-only; then
-    warn "git pull 未能快进（本地有改动或分支分叉）——请手动处理后重试，本次沿用当前代码"
+    die "git pull 未能快进（本地有改动、分支分叉或网络错误）；已停止，本次未执行更新"
   fi
 }
 
