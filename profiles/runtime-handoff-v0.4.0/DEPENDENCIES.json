@@ -1,0 +1,8 @@
+{
+  "python_version": "3.12.15",
+  "snapshot_packages": 113,
+  "locked_packages": 82,
+  "lock_vs_installed_differences": {},
+  "snapshot_scope": "local MCP venv312 only; reverse runtimes may use separate profile-specific interpreters",
+  "clean_install_verified": false
+}

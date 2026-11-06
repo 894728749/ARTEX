@@ -23,6 +23,8 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 本地 Agent、MCP 启用状态、工具绑定、触发器、Skills 和隐私网关通过显式配置包同步，见 [本地配置同步](docs/本地配置同步.md)。配置包不包含模型凭据、数据库密码或任务数据，导入时需按文档配置本机路径和环境变量。
 
+协作者部署可使用 [v0.4.0 脱敏运行交接材料](profiles/runtime-handoff-v0.4.0/RUNBOOK.zh-CN.md) 或下载 [交接 ZIP](https://github.com/cyy081021/ARTEX/releases/download/v0.4.0/ARTEX-runtime-handoff-v0.4.0.zip)。材料包含实际 integrations 启动脚本、网关源码、依赖锁、16 个 Agent/11 个 MCP 的配置快照、触发与审批配置、版本及校验记录；依赖和模型凭据需在目标设备自行配置，已有 9 个 Agent 可按差异核对，无需重录。
+
 里程碑标签及各标签的具体内容见 [发布说明](RELEASES.md)：
 
 | 标签 | 版本内容 |

@@ -1,0 +1,8 @@
+{
+  "tor_enabled_marker": false,
+  "browser_proxy_configured": true,
+  "browser_proxy_is_local_tor": false,
+  "windows_gateway_proxy_port": 7897,
+  "tor_http_port_when_enabled": 18118,
+  "observation": "configuration only; no egress probes performed for this export"
+}

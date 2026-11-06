@@ -1,0 +1,5 @@
+mcp==1.29.0
+mcp-server-fetch==2026.8.18
+mcp-server-git==2026.8.18
+semgrep==1.180.0
+PyYAML==6.0.3

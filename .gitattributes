@@ -1,2 +1,4 @@
 *.bat text eol=crlf
 *.sh  text eol=lf
+# Frozen handoff files must retain the bytes recorded in their checksum manifest.
+/profiles/runtime-handoff-v0.4.0/** -text

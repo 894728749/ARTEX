@@ -1,0 +1,13 @@
+{
+  "version": "0.4.0",
+  "repository": "https://github.com/cyy081021/ARTEX",
+  "commit": "bcfced88b666c69e8dbdce60ca986ea601d35b94",
+  "tag": "v0.4.0",
+  "runtime_binary_sha256": "e02e9e4492fb211cc1efdf42fde6c89a92a5a838ee507aa5cfe4a4509cb3f8f8",
+  "binary_matches_published_release": true,
+  "core_runtime_local_patch": "none; binary equals the verified GitHub Release binary",
+  "integration_customizations": "local scripts, separately hashed in MANIFEST.json",
+  "configuration_capture": "current local database, BEGIN READ ONLY / ROLLBACK, 2026-11-06",
+  "runtime_started": false,
+  "original_database_state_restored": true
+}

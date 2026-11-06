@@ -1,0 +1,188 @@
+{
+  "source": "actual local installation, allowlisted code and dependency files only",
+  "files": [
+    {
+      "source": "local-integrations/tools/privacy_mcp.py",
+      "destination": "integrations/tools/privacy_mcp.py",
+      "source_sha256": "5f71ae9ff9ab1c42f768550cb8a652bc927fa9209c0fd7d67c45e9d4331273a5",
+      "bundle_sha256": "1ba758d20785adf0e43e63e797b09719b1f9b131cc57209fe6cc39d239fdbc1b",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/tools/privacy_active_probe.py",
+      "destination": "integrations/tools/privacy_active_probe.py",
+      "source_sha256": "14e226aadca2050949b193679c6df09ec051242f5d015f7cefcde06883acc0b6",
+      "bundle_sha256": "859467b31e33f2fb466a46f482e1050812a03f14c97f0e5bf1ce1ec3c69e5e23",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/tools/privacy_task_observer.py",
+      "destination": "integrations/tools/privacy_task_observer.py",
+      "source_sha256": "012d96699a55fed70caa2d692eb7aa90b52015f45d76267b5fd8d2ba8d772b97",
+      "bundle_sha256": "012d96699a55fed70caa2d692eb7aa90b52015f45d76267b5fd8d2ba8d772b97",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/privacy_browser_probe.cjs",
+      "destination": "integrations/tools/privacy_browser_probe.cjs",
+      "source_sha256": "3390d48a72bf762d801f0623d9a40c755d8dc49606c2a8e8d5b3203a73f4b6da",
+      "bundle_sha256": "3390d48a72bf762d801f0623d9a40c755d8dc49606c2a8e8d5b3203a73f4b6da",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/chromium_privacy_launcher.py",
+      "destination": "integrations/tools/chromium_privacy_launcher.py",
+      "source_sha256": "9ff290844ae1f7572023bd4fa6f938a879f0fa58b7a7c51bd60fbc9fb935d7af",
+      "bundle_sha256": "bfb653c061d9d842a3b3c08e8567eaefec91a442bb833cc4bfab6de6c1d45001",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/tools/artex_api.py",
+      "destination": "integrations/tools/artex_api.py",
+      "source_sha256": "87517a1153565d07170c6d36f8bd383dfd12efec3ba26a75c9c49b9f69b52ad2",
+      "bundle_sha256": "6d5a97a50b8973d43d79c65b8acccca09b1bdbab99cce09740c5c139fc624f6c",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/tools/mcp_gate.py",
+      "destination": "integrations/tools/mcp_gate.py",
+      "source_sha256": "42fac37083e214f92622ac964385a2926b9cee7db92390ebe086fd5d23e6be59",
+      "bundle_sha256": "42fac37083e214f92622ac964385a2926b9cee7db92390ebe086fd5d23e6be59",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/semgrep_mcp.py",
+      "destination": "integrations/tools/semgrep_mcp.py",
+      "source_sha256": "c690c55ee8be6745f6362d4ed661844f49b0f7617449bb99afcdbc0cc098e956",
+      "bundle_sha256": "4175cb6f1cf044c86565cbeaf7e6184381452534ac03007b0476391671701523",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/tools/windows_dns_probe.ps1",
+      "destination": "integrations/tools/windows_dns_probe.ps1",
+      "source_sha256": "ea638368995fac66bbf6d0dde6dee4c4f6ec639eac744223f8fee7d727f33957",
+      "bundle_sha256": "ea638368995fac66bbf6d0dde6dee4c4f6ec639eac744223f8fee7d727f33957",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/windows_privacy.ps1",
+      "destination": "integrations/tools/windows_privacy.ps1",
+      "source_sha256": "34fd070f9f89d5f970ca4a32b4958d4634a927579de0f7858de476951c96face",
+      "bundle_sha256": "34fd070f9f89d5f970ca4a32b4958d4634a927579de0f7858de476951c96face",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/test_privacy_active_probe.py",
+      "destination": "integrations/tools/test_privacy_active_probe.py",
+      "source_sha256": "771f50206341a7f999bd01441247007cb86015bb3a482a7f4ab016126ad61af3",
+      "bundle_sha256": "771f50206341a7f999bd01441247007cb86015bb3a482a7f4ab016126ad61af3",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/test_privacy_task_observer.py",
+      "destination": "integrations/tools/test_privacy_task_observer.py",
+      "source_sha256": "d89109a648653467da7c64fa6228e12d9ed16ef6e46a79018cc9c5a7b1af7a55",
+      "bundle_sha256": "d89109a648653467da7c64fa6228e12d9ed16ef6e46a79018cc9c5a7b1af7a55",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/test_privacy_task_report.py",
+      "destination": "integrations/tools/test_privacy_task_report.py",
+      "source_sha256": "1a89ff8db591bded45391abf07036e04495f54bf9b017ebd34a77b518ba73fd0",
+      "bundle_sha256": "1a89ff8db591bded45391abf07036e04495f54bf9b017ebd34a77b518ba73fd0",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/tools/test_chromium_privacy_launcher.py",
+      "destination": "integrations/tools/test_chromium_privacy_launcher.py",
+      "source_sha256": "7baece6c2d374b53ed95a1d64207df4177d1433706cc71d4344e57da9981a720",
+      "bundle_sha256": "7baece6c2d374b53ed95a1d64207df4177d1433706cc71d4344e57da9981a720",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/bin/mcp-launch.sh",
+      "destination": "integrations/bin/mcp-launch.sh",
+      "source_sha256": "7f12b4d2363cc8547572d40a464a908ad72484222caa2a07b738aa4740adade4",
+      "bundle_sha256": "e4ebd2c580d250b724b0358b682475903a6f6c135624226d510d8ec6b8a24390",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/bin/proxy-env.sh",
+      "destination": "integrations/bin/proxy-env.sh",
+      "source_sha256": "394cd34637a5a401924cbe25b3b01904192f02075292d0142b1fabd0ee7dd3f3",
+      "bundle_sha256": "dbb3f0b14212e0dc32f7525a730b7e4a19cee5ef1ee0e2111e5d319d5b8607ef",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/bin/target-proxy-env.sh",
+      "destination": "integrations/bin/target-proxy-env.sh",
+      "source_sha256": "589d2dcccee402779bb60eee33870679e4563543dd2fd6568413ad19bb5ef6e9",
+      "bundle_sha256": "f38a28e766655f9807f50e9c494e52064fb7aa966e9ee7e3d9507bdd6ad92945",
+      "adapted": true
+    },
+    {
+      "source": "local-integrations/python-requirements.lock.txt",
+      "destination": "integrations/python-requirements.lock.txt",
+      "source_sha256": "3f5dcc50a878617d18fe9796fa81ed1bb22167115b517a20b6df18fe843665de",
+      "bundle_sha256": "3f5dcc50a878617d18fe9796fa81ed1bb22167115b517a20b6df18fe843665de",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/node/package.json",
+      "destination": "integrations/node/package.json",
+      "source_sha256": "8b040354cf158b5197043d998a0c907c7b58d61158d81b7829dc496facd7467c",
+      "bundle_sha256": "8b040354cf158b5197043d998a0c907c7b58d61158d81b7829dc496facd7467c",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/node/package-lock.json",
+      "destination": "integrations/node/package-lock.json",
+      "source_sha256": "9ef71c8ace6eaf72a9be9d1ca033340aeb1c325faab7b382fa817fdc20d8a275",
+      "bundle_sha256": "9ef71c8ace6eaf72a9be9d1ca033340aeb1c325faab7b382fa817fdc20d8a275",
+      "adapted": false
+    },
+    {
+      "source": "local-integrations/reverse/reverse_runtime.py",
+      "destination": "integrations/reverse/reverse_runtime.py",
+      "source_sha256": "0694ed5efa35359dd487c6d905f43012729392928ffcf1d16d365197ca6f92ac",
+      "bundle_sha256": "0694ed5efa35359dd487c6d905f43012729392928ffcf1d16d365197ca6f92ac",
+      "adapted": false
+    }
+  ],
+  "bound_skills": [
+    "api-recon",
+    "artex-asset-manager",
+    "artex-evidence-reporting",
+    "artex-goal-decomposition",
+    "artex-independent-retest",
+    "artex-orchestrator-hints",
+    "artex-patch-validation",
+    "artex-pentest-workflow",
+    "artex-situation-planner",
+    "artex-source-context",
+    "artex-variant-analysis",
+    "artex-windows-privacy-audit",
+    "artex-worker-execution"
+  ],
+  "excluded": [
+    "credentials",
+    "runtime config",
+    "jwt.key",
+    "task data",
+    "logs",
+    "reports",
+    "browser profiles",
+    "knowledge.jsonl",
+    "Tor state/seeds",
+    "venv",
+    "node_modules",
+    "third-party binaries"
+  ],
+  "normalization": "UTF-8 without BOM; portable scripts use LF",
+  "generated_helpers": [
+    "integrations/bin/runtime-env.sh",
+    "integrations/setup-dependencies.sh",
+    "integrations/runtime.env.example",
+    "integrations/requirements-core.txt"
+  ]
+}

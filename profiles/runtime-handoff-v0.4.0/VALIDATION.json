@@ -1,0 +1,93 @@
+{
+  "scope": "isolated copied scripts; existing installed dependencies reused, no clean-install claim",
+  "model_calls": false,
+  "production_api_calls": false,
+  "external_probes": false,
+  "checks": {
+    "syntax": "passed",
+    "synthetic_unit_tests": {
+      "exit_code": 0,
+      "count": 33,
+      "summary": "33 synthetic tests passed; dependency emitted an IncompleteFieldDefinitionWarning"
+    },
+    "mcp-planning": {
+      "initialize": "passed",
+      "tools": [
+        "sequentialthinking"
+      ]
+    },
+    "mcp-files-readonly": {
+      "initialize": "passed",
+      "tools": [
+        "directory_tree",
+        "get_file_info",
+        "list_allowed_directories",
+        "list_directory",
+        "list_directory_with_sizes",
+        "read_file",
+        "read_multiple_files",
+        "read_text_file",
+        "search_files"
+      ]
+    },
+    "mcp-files-workspace": {
+      "initialize": "passed",
+      "tools": [
+        "create_directory",
+        "directory_tree",
+        "edit_file",
+        "get_file_info",
+        "list_allowed_directories",
+        "list_directory",
+        "list_directory_with_sizes",
+        "read_file",
+        "read_multiple_files",
+        "read_text_file",
+        "search_files",
+        "write_file"
+      ]
+    },
+    "mcp-git-readonly": {
+      "initialize": "passed",
+      "tools": [
+        "git_diff",
+        "git_diff_staged",
+        "git_diff_unstaged",
+        "git_log",
+        "git_show",
+        "git_status"
+      ]
+    },
+    "mcp-privacy": {
+      "initialize": "passed",
+      "tools": [
+        "network_snapshot",
+        "scan_evidence",
+        "write_privacy_report"
+      ]
+    },
+    "mcp-semgrep": {
+      "initialize": "passed",
+      "tools": [
+        "semgrep_scan_with_custom_rule"
+      ]
+    },
+    "mcp-browser": {
+      "initialize": "passed",
+      "browser_navigate": "passed",
+      "fixture_marker": "HANDOFF_LOCAL_FIXTURE_OK",
+      "browser": "WSL Chromium, isolated profile with copied privacy launcher",
+      "network": "local HTTP synthetic page; local fake proxy/gateway, no external page requested",
+      "production_api_used": false,
+      "windows_edge_probe": "not run"
+    },
+    "powershell_syntax": "collector and DNS probe parsed successfully on Windows",
+    "secret_scan": {
+      "tool": "gitleaks 8.30.1",
+      "findings": 0,
+      "scope": "allowlisted handoff directory",
+      "limit": "pattern-based detection; runtime data and secrets excluded before scanning"
+    }
+  },
+  "result": "passed"
+}

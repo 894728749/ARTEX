@@ -14,6 +14,13 @@
 
 协作、逆向功能的测试边界仍见下方协作版本记录：本机逻辑设备与自有样本验收不等于第二台物理设备或公网 NAT 验收。容器内默认工具链沿用现有 Dockerfile；APK/.NET/原生逆向引擎及动态运行环境仍需依照逆向配置文档安装。首次 GHCR 包如默认私有，维护者需在包设置中改为 Public，匿名用户才能拉取。
 
+### 2026-11-06 运行交接材料补充
+
+- 增补 `ARTEX-runtime-handoff-v0.4.0.zip` 与独立 `.zip.sha256` 附件，源码材料见 [`profiles/runtime-handoff-v0.4.0/`](profiles/runtime-handoff-v0.4.0/RUNBOOK.zh-CN.md)。这是已有核心版本的部署补充；`v0.4.0` 标签、程序包与镜像保持原构建。
+- 包含本机实际 integrations 的路径参数化副本、MCP 启动脚本、四个 privacy 工具及 Windows DNS/配置采集依赖、Python/Node 锁文件、13 个绑定技能和当前 16 个 Agent/11 个 MCP 的脱敏配置。保留逐文件来源哈希、适配差异、触发与全局拦截配置，不附带密钥、任务数据、浏览器会话或 Tor 状态。
+- 本机隔离验证通过 33 项合成测试、7 个本地 MCP 握手及 Chromium 本地测试页导航，复用现有依赖。目标机器全新安装、Windows Edge 探测和真实模型调用未验收；ScopeSentry 声明启用但未配 URL，不计作可用远端 MCP。
+- GHCR `v0.4.0` 与 `latest` 双架构镜像已实际匿名拉取并通过命令行冒烟检查；交接快照中的 Tor 开关关闭，模型凭据和目标设备路径由接收方自行配置。
+
 ## `artex-baseline`
 
 ARTEX 0.3.15 的原始源码基线，对应提交 `5c0dbd4`。保留原有渗透测试路线，作为后续改进的参照点。

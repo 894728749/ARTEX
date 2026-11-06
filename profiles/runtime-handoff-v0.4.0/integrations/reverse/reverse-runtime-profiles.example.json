@@ -1,0 +1,24 @@
+[
+  {
+    "id": "linux-lab", "name": "Linux 实验环境", "platform": "linux",
+    "command": "/absolute/path/to/frida-venv/bin/python",
+    "args": ["/absolute/path/to/ARTEX/scripts/reverse_runtime.py"], "settings": {}
+  },
+  {
+    "id": "windows-lab", "name": "Windows 实验环境", "platform": "windows",
+    "command": "C:\\absolute\\frida-venv\\Scripts\\python.exe",
+    "args": ["C:\\absolute\\ARTEX\\scripts\\reverse_runtime.py"], "settings": {}
+  },
+  {
+    "id": "android-lab", "name": "Android 模拟器", "platform": "android",
+    "command": "/absolute/path/to/frida-venv/bin/python",
+    "args": ["/absolute/path/to/ARTEX/scripts/reverse_runtime.py"],
+    "settings": {
+      "remote": {"address": "127.0.0.1:27084"}, "remote_is_lab": true,
+      "adb": "/absolute/path/to/android-sdk/platform-tools/adb", "adb_port": 5038,
+      "adb_serial": "emulator-5584", "aapt": "/absolute/path/to/android-sdk/build-tools/35.0.0/aapt",
+      "allow_package_install": true,
+      "java_bridge_module": "/absolute/path/to/node_modules/frida-java-bridge/index.js"
+    }
+  }
+]

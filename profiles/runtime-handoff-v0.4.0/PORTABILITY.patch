@@ -1,0 +1,315 @@
+--- source-redacted/tools/privacy_mcp.py
++++ integrations/tools/privacy_mcp.py
+@@ -1,5 +1,6 @@
+ """Bounded Windows configuration and public-observer privacy MCP for ARTEX."""
+ import json
++import os
+ import re
+ import subprocess
+ import uuid
+@@ -9,13 +10,13 @@
+ from typing import Literal
+ from mcp.server.fastmcp import FastMCP
+ 
+-ROOT = Path('${SOURCE_INSTALL_ROOT}/integrations')
++ROOT = Path(os.environ['ARTEX_INTEGRATIONS_ROOT'])
+ EVIDENCE = ROOT / 'workspace/evidence'
+ REPORTS = ROOT / 'workspace/reports/privacy'
+ SNAPSHOTS = REPORTS / 'observations'
+ LAST_SNAPSHOT = None
+-PS = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+-COLLECTOR = r'${SOURCE_WINDOWS_ROOT}\integrations\tools\windows_privacy.ps1'
++PS = os.environ['ARTEX_POWERSHELL']
++COLLECTOR = os.environ['ARTEX_PRIVACY_COLLECTOR']
+ mcp = FastMCP('artex-privacy-local')
+ ReportStatus = Literal['unknown','risk','no_markers_in_checked_file','observed_with_limits','partial','no_leak_observed']
+ CheckItem = Literal['windows_network_configuration','ipv4_egress','ipv6_egress','dns_path','proxy_bypass','webrtc','evidence_private_markers','test_process_scope']
+--- source-redacted/tools/privacy_active_probe.py
++++ integrations/tools/privacy_active_probe.py
+@@ -9,13 +9,13 @@
+ from pathlib import Path
+ from urllib.parse import urlsplit
+ 
+-from artex_api import request, RUNTIME
+-
+-ROOT = RUNTIME.parent / 'integrations'
+-WIN_ROOT = r'${SOURCE_WINDOWS_ROOT}\integrations'
+-PS = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+-WIN_CURL = '/mnt/c/Windows/System32/curl.exe'
+-WIN_NODE = '${SOURCE_WINDOWS_USER_HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe'
++from artex_api import request
++
++ROOT = Path(os.environ['ARTEX_INTEGRATIONS_ROOT'])
++WIN_ROOT = os.environ['ARTEX_WINDOWS_INTEGRATIONS_ROOT']
++PS = os.environ['ARTEX_POWERSHELL']
++WIN_CURL = os.environ['ARTEX_WINDOWS_CURL']
++WIN_NODE = os.environ['ARTEX_WINDOWS_NODE']
+ ENDPOINTS = {'ipv4': 'https://api.ipify.org?format=json',
+              'ipv6': 'https://api6.ipify.org?format=json',
+              'tor': 'https://check.torproject.org/api/ip'}
+@@ -188,11 +188,11 @@
+     if windows:
+         if guarded:
+             config['webrtc_policy'] = 'disable_non_proxied_udp'
+-        config['module_path'] = '\\\\wsl.localhost\\Ubuntu' + str(module).replace('/', '\\')
+-        config['executable_path'] = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
++        config['module_path'] = '\\\\wsl.localhost\\' + os.environ.get('ARTEX_WSL_DISTRO', 'Ubuntu') + str(module).replace('/', '\\')
++        config['executable_path'] = os.environ.get('ARTEX_WINDOWS_EDGE', r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
+         cmd = [WIN_NODE, WIN_ROOT + r'\tools\privacy_browser_probe.cjs']
+     else:
+-        cmd = ['${SOURCE_USER_HOME}', str(ROOT / 'tools/privacy_browser_probe.cjs')]
++        cmd = [os.environ.get('ARTEX_NODE', 'node'), str(ROOT / 'tools/privacy_browser_probe.cjs')]
+     try:
+         result = subprocess.run(cmd, input=json.dumps(config).encode(), capture_output=True,
+                                 env=env, timeout=70)
+--- source-redacted/tools/chromium_privacy_launcher.py
++++ integrations/tools/chromium_privacy_launcher.py
+@@ -1,4 +1,4 @@
+-#!${SOURCE_INSTALL_ROOT}/integrations/venv312/bin/python
++#!/usr/bin/env python3
+ """Add the WebRTC privacy preference to a fresh Playwright Chromium profile."""
+ 
+ from __future__ import annotations
+@@ -10,7 +10,7 @@
+ from pathlib import Path
+ 
+ 
+-CHROMIUM = "${SOURCE_INSTALL_ROOT}/integrations/browsers/chromium-1247/chrome-linux64/chrome"
++CHROMIUM = os.environ['ARTEX_PRIVACY_CHROMIUM']
+ PROFILE_PREFIX = "playwright_chromiumdev_profile-"
+ WEBRTC_POLICY = "disable_non_proxied_udp"
+ 
+--- source-redacted/tools/artex_api.py
++++ integrations/tools/artex_api.py
+@@ -1,5 +1,6 @@
+ """Project-local ARTEX maintenance API client; never prints or stores credentials."""
+ import base64
++import os
+ import hashlib
+ import hmac
+ import json
+@@ -7,8 +8,8 @@
+ import urllib.request
+ from pathlib import Path
+ 
+-RUNTIME = Path('${SOURCE_INSTALL_ROOT}/runtime')
+-BASE = 'http://127.0.0.1:8787'
++RUNTIME = Path(os.environ['ARTEX_RUNTIME_ROOT'])
++BASE = os.environ.get('ARTEX_API_BASE', 'http://localhost:8787')
+ 
+ def _b64(value):
+     return base64.urlsafe_b64encode(value).rstrip(b'=').decode('ascii')
+@@ -31,10 +32,3 @@
+     with opener.open(req, timeout=timeout) as response:
+         return json.load(response)
+ 
+-if __name__ == '__main__':
+-    agents = request('/api/agents')['agents']
+-    mcps = request('/api/mcp')['servers']
+-    skills = request('/api/skills')
+-    print(json.dumps({'agents':[{'key':a['key'],'id':a['id'],'skills':a.get('skill_count'),'mcps':a.get('mcp_count'),'enabled':a.get('enabled')} for a in agents],
+-                      'mcp':[{'id':m['id'],'name':m['name'],'transport':m['transport'],'enabled':m['enabled'],'tool_count':len(m.get('tools',[])),'env_keys':list((m.get('env') or {}).keys())} for m in mcps],
+-                      'skills':skills},ensure_ascii=False))
+--- source-redacted/tools/semgrep_mcp.py
++++ integrations/tools/semgrep_mcp.py
+@@ -7,7 +7,7 @@
+ import yaml
+ from mcp.server.fastmcp import FastMCP
+ 
+-ROOT = Path('${SOURCE_INSTALL_ROOT}/integrations')
++ROOT = Path(os.environ['ARTEX_INTEGRATIONS_ROOT'])
+ mcp = FastMCP('artex-semgrep-local')
+ LANGUAGES = {'python':'.py','javascript':'.js','typescript':'.ts','go':'.go','java':'.java','c':'.c','cpp':'.cpp','ruby':'.rb','php':'.php','generic':'.txt'}
+ 
+--- source-redacted/bin/mcp-launch.sh
++++ integrations/bin/mcp-launch.sh
+@@ -1,19 +1,22 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ umask 077
+-root=${SOURCE_INSTALL_ROOT}
+-i="$root/integrations"
++i=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
++if [ -f "$i/runtime.env" ]; then source "$i/runtime.env"; fi
++source "$i/bin/runtime-env.sh"
++root=${ARTEX_SOURCE_ROOT:?Set ARTEX_SOURCE_ROOT to the checked-out ARTEX source}
++i="$ARTEX_INTEGRATIONS_ROOT"
+ py="$i/venv312/bin/python"
+-node=${SOURCE_USER_HOME}
++node="$ARTEX_NODE"
+ mode=${1:?MCP instance required}
+ shift
+-export PATH="$i/venv312/bin:${SOURCE_USER_HOME}/.local/bin:$PATH"
++export PATH="$i/venv312/bin:$PATH"
+ export PLAYWRIGHT_BROWSERS_PATH="$i/browsers"
+ export SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0
+ export DISABLE_THOUGHT_LOGGING=true
+ case "$mode" in
+   planning) exec "$node" "$i/node/node_modules/@modelcontextprotocol/server-sequential-thinking/dist/index.js" "$@" ;;
+-  files-readonly) exec "$py" "$i/tools/mcp_gate.py" files-ro "$node" "$i/node/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js" "$root/ARTEX-0.3.15" "$i/workspace/evidence" "$i/workspace/reports" ;;
++  files-readonly) exec "$py" "$i/tools/mcp_gate.py" files-ro "$node" "$i/node/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js" "$root" "$i/workspace/evidence" "$i/workspace/reports" ;;
+   files-workspace) exec "$py" "$i/tools/mcp_gate.py" files-rw "$node" "$i/node/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js" "$i/workspace" ;;
+   git-readonly) export ARTEX_GIT_ROOT="$i/workspace"; exec "$py" "$i/tools/mcp_gate.py" git-ro "$py" -m mcp_server_git ;;
+   privacy) exec "$py" "$i/tools/privacy_mcp.py" ;;
+@@ -29,6 +32,6 @@
+     ;;
+   fetch) source "$i/bin/proxy-env.sh"; source "$i/bin/target-proxy-env.sh"; exec "$py" -m mcp_server_fetch "$@" ;;
+   memory) export MEMORY_FILE_PATH="$i/workspace/knowledge.jsonl"; exec "$node" "$i/node/node_modules/@modelcontextprotocol/server-memory/dist/index.js" "$@" ;;
+-  burp) exec "$i/toolchain/java/runtime/usr/lib/jvm/java-21-openjdk-amd64/bin/java" -jar "$i/vendor/burp/mcp-proxy-all.jar" "$@" ;;
++  burp) exec "${ARTEX_JAVA:-java}" -jar "${ARTEX_BURP_PROXY_JAR:-$i/vendor/burp/mcp-proxy-all.jar}" "$@" ;;
+   *) printf 'Unknown project MCP instance\n' >&2; exit 2 ;;
+ esac
+--- source-redacted/bin/proxy-env.sh
++++ integrations/bin/proxy-env.sh
+@@ -37,6 +37,8 @@
+     print('ARTEX proxy: wait override must be between 1 and 90 seconds', file=sys.stderr)
+     raise SystemExit(1)
+ 
++proxy_port = int(os.environ.get('ARTEX_WINDOWS_PROXY_PORT', '7897'))
++if not 1 <= proxy_port <= 65535: raise SystemExit('Invalid proxy port')
+ deadline = time.monotonic() + wait
+ attempt = 0
+ last_error = 'no WSL default gateway'
+@@ -70,7 +72,7 @@
+         last_error = 'could not determine the WSL default gateway'
+ 
+     if gateway is not None:
+-        endpoint = 'http://%s:7897' % gateway
++        endpoint = 'http://%s:%s' % (gateway, proxy_port)
+         print(
+             'ARTEX proxy: waiting for Windows proxy %s (attempt %d)'
+             % (endpoint, attempt),
+@@ -81,7 +83,7 @@
+             break
+         try:
+             with socket.create_connection(
+-                (gateway, 7897), timeout=max(0.2, min(3.0, remaining))
++                (gateway, proxy_port), timeout=max(0.2, min(3.0, remaining))
+             ):
+                 print(
+                     'ARTEX proxy: ready at %s (attempt %d)' % (endpoint, attempt),
+@@ -90,7 +92,7 @@
+                 print(endpoint)
+                 raise SystemExit(0)
+         except OSError:
+-            last_error = 'Windows proxy port 7897 is unavailable at %s' % endpoint
++            last_error = 'Windows configured proxy port is unavailable at %s' % endpoint
+ 
+     remaining = deadline - time.monotonic()
+     if remaining <= 0:
+@@ -99,7 +101,7 @@
+ 
+ print(
+     'ARTEX proxy: failed after %ss: %s; Windows proxy must be listening on '
+-    'the WSL gateway port 7897; startup stopped (no direct fallback)'
++    'the WSL configured gateway port; startup stopped (no direct fallback)'
+     % (wait, last_error),
+     file=sys.stderr,
+ )
+--- source-redacted/bin/target-proxy-env.sh
++++ integrations/bin/target-proxy-env.sh
+@@ -2,7 +2,7 @@
+ # Source after proxy-env.sh: infrastructure keeps the existing Windows gateway.
+ export ARTEX_LLM_PROXY="$HTTPS_PROXY"
+ export ARTEX_TARGET_PROXY="$ARTEX_LLM_PROXY"
+-if [ -f ${SOURCE_INSTALL_ROOT}/integrations/tor/enabled ]; then
++if [ -f "$ARTEX_INTEGRATIONS_ROOT/tor/enabled" ]; then
+   export ARTEX_TARGET_PROXY='http://127.0.0.1:18118'
+   export HTTP_PROXY="$ARTEX_TARGET_PROXY" HTTPS_PROXY="$ARTEX_TARGET_PROXY" ALL_PROXY="$ARTEX_TARGET_PROXY"
+   export http_proxy="$ARTEX_TARGET_PROXY" https_proxy="$ARTEX_TARGET_PROXY" all_proxy="$ARTEX_TARGET_PROXY"
+
+# New handoff helpers
+--- /dev/null
++++ integrations/bin/runtime-env.sh
+@@ -0,0 +1,30 @@
++#!/usr/bin/env bash
++# Source into the MCP child only. This file does not change system settings.
++export ARTEX_INTEGRATIONS_ROOT="${ARTEX_INTEGRATIONS_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
++export ARTEX_NODE="${ARTEX_NODE:-node}"
++export ARTEX_API_BASE="${ARTEX_API_BASE:-http://localhost:8787}"
++export ARTEX_POWERSHELL="${ARTEX_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
++export ARTEX_WINDOWS_CURL="${ARTEX_WINDOWS_CURL:-/mnt/c/Windows/System32/curl.exe}"
++export ARTEX_WINDOWS_NODE="${ARTEX_WINDOWS_NODE:-/mnt/c/Program Files/nodejs/node.exe}"
++export ARTEX_WSL_DISTRO="${ARTEX_WSL_DISTRO:-Ubuntu}"
++export ARTEX_WINDOWS_PROXY_PORT="${ARTEX_WINDOWS_PROXY_PORT:-7897}"
++if [ -z "${ARTEX_WINDOWS_INTEGRATIONS_ROOT:-}" ] && command -v wslpath >/dev/null 2>&1; then
++  export ARTEX_WINDOWS_INTEGRATIONS_ROOT="$(wslpath -w "$ARTEX_INTEGRATIONS_ROOT")"
++fi
++if [ -n "${ARTEX_WINDOWS_INTEGRATIONS_ROOT:-}" ]; then
++  export ARTEX_PRIVACY_COLLECTOR="${ARTEX_PRIVACY_COLLECTOR:-${ARTEX_WINDOWS_INTEGRATIONS_ROOT}\\tools\\windows_privacy.ps1}"
++fi
++export PLAYWRIGHT_BROWSERS_PATH="$ARTEX_INTEGRATIONS_ROOT/browsers"
++if [ -z "${ARTEX_PRIVACY_CHROMIUM:-}" ]; then
++  for playwright_module in "$ARTEX_INTEGRATIONS_ROOT/node/node_modules/playwright" "$ARTEX_INTEGRATIONS_ROOT/node/node_modules/@playwright/mcp/node_modules/playwright"; do
++    if [ -d "$playwright_module" ]; then
++      export ARTEX_PRIVACY_CHROMIUM="$("$ARTEX_NODE" -e 'console.log(require(process.argv[1]).chromium.executablePath())' "$playwright_module")"
++      break
++    fi
++  done
++  export ARTEX_PRIVACY_CHROMIUM="${ARTEX_PRIVACY_CHROMIUM:-$ARTEX_INTEGRATIONS_ROOT/browsers/chromium-1247/chrome-linux64/chrome}"
++  unset playwright_module
++fi
++export PATH="$ARTEX_INTEGRATIONS_ROOT/venv312/bin:$PATH"
++mkdir -p "$ARTEX_INTEGRATIONS_ROOT/workspace/evidence" "$ARTEX_INTEGRATIONS_ROOT/workspace/reports/browser"
++
+--- /dev/null
++++ integrations/setup-dependencies.sh
+@@ -0,0 +1,22 @@
++#!/usr/bin/env bash
++# Explicit local dependency installation only; does not import profiles/start ARTEX.
++set -euo pipefail
++umask 077
++i=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
++python_bin=${ARTEX_PYTHON_BOOTSTRAP:-python3.12}
++command -v "$python_bin" >/dev/null
++command -v node >/dev/null
++command -v npm >/dev/null
++"$python_bin" -c 'import sys; assert sys.version_info[:2] == (3,12), "Use Python 3.12"'
++node -e 'if(Number(process.versions.node.split(".")[0])<20)process.exit(1)'
++if [ ! -e "$i/venv312" ]; then "$python_bin" -m venv "$i/venv312"; fi
++"$i/venv312/bin/python" -m pip install -r "$i/python-requirements.lock.txt"
++(cd "$i/node" && npm ci)
++export PLAYWRIGHT_BROWSERS_PATH="$i/browsers"
++cli="$i/node/node_modules/playwright/cli.js"
++if [ ! -f "$cli" ]; then cli="$i/node/node_modules/@playwright/mcp/node_modules/playwright/cli.js"; fi
++node "$cli" install chromium
++chmod +x "$i/bin/"*.sh "$i/tools/chromium_privacy_launcher.py"
++printf '%s\n' 'Dependencies installed. No Agent/MCP/task was enabled or started.'
++printf '%s\n' 'If Linux browser libraries are missing, review and run: node <the same playwright/cli.js> install-deps chromium'
++printf '%s\n' 'Before running MCPs, copy runtime.env.example to runtime.env and fill in your own paths.'
+--- /dev/null
++++ integrations/runtime.env.example
+@@ -0,0 +1,25 @@
++# Copy to runtime.env and edit on the recipient machine. Never share runtime.env.
++# Paths below are examples, not the source machine's paths.
++export ARTEX_RUNTIME_ROOT='/path/to/your/artex/runtime'
++export ARTEX_SOURCE_ROOT='/path/to/your/ARTEX'
++export ARTEX_API_BASE='http://localhost:8787'
++# ARTEX_INTEGRATIONS_ROOT is inferred from this bundle by the launcher.
++# export ARTEX_INTEGRATIONS_ROOT='/path/to/this/integrations'
++export ARTEX_NODE='node'
++export ARTEX_WSL_DISTRO='Ubuntu'
++export ARTEX_WINDOWS_PROXY_PORT='7897'
++export ARTEX_PROXY_WAIT_SECONDS='90'
++export ARTEX_POWERSHELL='/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
++export ARTEX_WINDOWS_CURL='/mnt/c/Windows/System32/curl.exe'
++export ARTEX_WINDOWS_NODE='/mnt/c/Program Files/nodejs/node.exe'
++# Windows-readable path; default uses wslpath -w on ARTEX_INTEGRATIONS_ROOT.
++# export ARTEX_WINDOWS_INTEGRATIONS_ROOT='C:\path\to\integrations'
++# export ARTEX_PRIVACY_COLLECTOR='C:\path\to\integrations\tools\windows_privacy.ps1'
++# Defaults to the browser installed by the locked Playwright dependency.
++# export ARTEX_PRIVACY_CHROMIUM='/path/to/integrations/browsers/chromium-1247/chrome-linux64/chrome'
++export ARTEX_WINDOWS_EDGE='C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
++# Optional disabled Burp integration; install and configure separately.
++# export ARTEX_JAVA='java'
++# export ARTEX_BURP_PROXY_JAR='/path/to/mcp-proxy-all.jar'
++# Model credentials belong in your own ARTEX model settings, not this file.
++
+--- /dev/null
++++ integrations/requirements-core.txt
+@@ -0,0 +1,5 @@
++mcp==1.29.0
++mcp-server-fetch==2026.8.18
++mcp-server-git==2026.8.18
++semgrep==1.180.0
++PyYAML==6.0.3
