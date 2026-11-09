@@ -2,6 +2,41 @@
 
 本文记录仓库里程碑标签对应的源码内容。`artex-*` 保留历史源码里程碑；带下载包的正式版本使用 `vX.Y.Z`，在线更新仅支持这类正式 Release。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 中实际完成上传的资产为准。前三个标签的说明依据标签注释及其对应提交；逆向验收范围另见 [`docs/逆向验收记录.md`](docs/逆向验收记录.md)。协作功能的配置和执行边界见 [协作说明](examples/README.md)，验证摘要列于下文。研发过程中的“v2”是内部迭代名称，首个公开协作标签为 `artex-collaboration-v1`。
 
+## `v0.4.1`
+
+发布日期：2026-11-09。修复旧内置提示词未随程序更新、升级覆盖自定义内容或错误标记完成、并发保存版本冲突，以及资产覆盖率误计。原有 `v0.4.0` 和历史源码里程碑标签保持不变。
+
+### 修复内容
+
+- 启动时识别并升级仍由系统维护的旧内置提示词；保留自定义内容、无法识别的模板及完整历史。默认模板哈希与版本更新原子提交，升级失败可在下次启动重试，重复启动不追加相同版本。
+- 移除旧的一次性强制重置逻辑，避免覆盖自定义提示词或在写入失败后误记升级完成。升级旧库时，识别仍由系统维护的已知 goals、mainagent、planner 默认模板并追加新版本；人工保存的自定义版本及未知文本不被覆盖。
+- 提示词保存、空白初始化和默认升级共用 Agent 行锁，避免并发计算相同版本号，保留完整版本历史。
+- 当前任务与直接来源任务的资产覆盖仅统计 confirmed fact，初始化 origin 与已否定 dismissed fact 不再计入已测；覆盖图、覆盖统计和未测列表保持一致。
+
+### 验证结果
+
+以下修复验收于 2026-11-07 在独立 PostgreSQL 与本机隔离环境中完成，发布前核对了代码差异和验收记录：
+
+- 数据库回归与 race 检查通过：已知旧默认升级、未知/自定义内容保留、后续默认更新、幂等、空模板/不存在的 Agent 拒绝、注入写入故障后的回滚与重试、24 路并发保存，以及 20 路初始化和保存/同步竞争。
+- 相关 Agent 与服务端回归通过，覆盖真实历史 Planner 默认模板升级及自定义 Worker 保留。
+- Linux amd64 内嵌前端程序构建成功。完整进程连续启动两次，实际登录及 Agent/覆盖 API 验收通过：旧默认只追加一次升级版本，自定义 Worker 内容不变；origin、dismissed、confirmed 三条合成事实的覆盖率返回 **1/3**。
+- 当前任务和直接来源任务的覆盖统计、未测列表、覆盖图一致；同一资产的多个 confirmed 锚点只计一次。
+- 本机应用修复时，任务、报告、活动、资产、约束、复测/关系和模型/MCP/工具配置的记录数及内容摘要保持一致。正式 ARTEX 未启动、任务未恢复；数据库维护完成后恢复停止。
+
+回归命令（须设置指向独立测试库的 `ARTEX_PG_DSN`）：
+
+```bash
+go test -race -count=1 ./db -run 'TestPrompt|TestCoverageCountsOnlyConfirmedFactAnchors|TestConfigStores'
+go test -count=1 ./server -run 'TestSeedPrompts|TestMgmtAPI|TestFindingRetest|TestExecutionFinal|TestPrompt'
+go test -count=1 ./agent -run 'TestPrompt|TestPlanner|TestWorker|TestExecutionContract'
+```
+
+### 升级及验收边界
+
+- 升级会新增 `agent_prompt_defaults` 元数据表；历史提示词版本保留，自定义内容不自动改为新版默认。升级前按常规备份数据库和配置。
+- 资产覆盖仍表示有效事实关联的资产范围，不等于所有适用漏洞类别都已充分测试。有效阴性观察仍可作为 confirmed fact 计入，漏洞处置状态与独立复测结论继续分别保留。
+- 本轮没有执行外部目标测试、真实模型任务、第二台物理设备验收或全平台运行验证。五平台程序与双架构容器由 tag 发布流水线构建，流水线结果以对应 GitHub Actions 运行记录为准。
+
 ## `v0.4.0`
 
 将 ARTEX 的安装和更新发布源迁移到 `cyy081021/ARTEX`，并建立本仓库的正式二进制与容器发布流程。包含此前 `artex-collaboration-v1` 的完整源码功能。

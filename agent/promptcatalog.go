@@ -113,9 +113,9 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 - 全程**中文**。做完（已成功调用 update_finding_report）就结束，用一两句话说明你为哪个漏洞写了报告即可。`
 
 // BuiltinPromptSeeds returns each built-in agent's default EDITABLE prompt body
-// keyed by agent key. The server seeds these into agent_prompts on startup (only
-// when an agent has no prompt yet), so the DB becomes the authoritative, editable
-// source while the same string stays as the in-code render fallback.
+// keyed by agent key. The server synchronizes recognized system-owned defaults
+// on startup while retaining user edits. The same strings remain the render
+// fallbacks when no saved template exists.
 func BuiltinPromptSeeds() map[string]string {
 	return map[string]string{
 		"goals":            goalsDefaultTmpl,

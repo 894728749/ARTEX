@@ -865,6 +865,10 @@ CREATE TABLE IF NOT EXISTS agent_prompts (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (agent_id, version)
 );
+CREATE TABLE IF NOT EXISTS agent_prompt_defaults (
+    agent_id      BIGINT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    template_hash TEXT NOT NULL
+);
 -- 循环外键：agents.current_prompt_id → agent_prompts.id（需在两表创建后加）
 DO $$ BEGIN
     ALTER TABLE agents ADD CONSTRAINT fk_agents_curprompt

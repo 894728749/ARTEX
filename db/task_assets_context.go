@@ -48,7 +48,7 @@ target AS (
 tested AS (
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
-  JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind='fact'
+  JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind='fact' AND en.state='confirmed'
   JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
 )`
 

@@ -320,7 +320,7 @@ tested AS (
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id = ea.node_id
-  WHERE en.exploration_id = $2 AND en.kind = 'fact'
+  WHERE en.exploration_id = $2 AND en.kind = 'fact' AND en.state = 'confirmed'
 )`
 
 // TaskCoverage computes rough per-type coverage for a task. taskID indexes

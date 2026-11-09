@@ -200,10 +200,9 @@ func idSet(ids []int64) map[int64]bool {
 	return m
 }
 
-// seedPrompts writes each built-in agent's code-default prompt body into
-// agent_prompts on startup — first-insert only (SeedPromptIfEmpty is a no-op once
-// any version exists), so the DB becomes the authoritative editable source while
-// user edits survive restarts. Runs after seedBuiltins has created the agent rows.
+// seedPrompts synchronizes known system-owned defaults while retaining custom
+// prompts and their history. The stored default hash makes later upgrades
+// idempotent without one-shot flags that can conceal a failed migration.
 func seedPrompts(pg *db.DB) {
 	for key, tmpl := range agent.BuiltinPromptSeeds() {
 		a, err := pg.GetAgentByKey(key)
@@ -211,8 +210,10 @@ func seedPrompts(pg *db.DB) {
 			log.Printf("[prompts] seed %s 跳过: agent 不存在 (%v)", key, err)
 			continue
 		}
-		if err := pg.SeedPromptIfEmpty(a.ID, tmpl); err != nil {
-			log.Printf("[prompts] seed %s 失败: %v", key, err)
+		if changed, err := pg.SyncBuiltinPrompt(a.ID, tmpl, agent.LegacyBuiltinPromptHashes(key)); err != nil {
+			log.Printf("[prompts] sync %s 失败，保留原版本，下次启动重试: %v", key, err)
+		} else if changed {
+			log.Printf("[prompts] %s 已同步内置默认，历史版本保留", key)
 		}
 	}
 }

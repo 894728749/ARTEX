@@ -741,15 +741,22 @@ func (d *DB) CurrentPrompt(agentID int64) (string, error) {
 // SeedTool's first-insert-only philosophy: a user's edited prompt is never
 // clobbered on restart. Idempotent — a no-op once any version exists.
 func (d *DB) SeedPromptIfEmpty(agentID int64, tmpl string) error {
-	var cur sql.NullInt64
-	if err := d.QueryRow(`SELECT current_prompt_id FROM agents WHERE id=$1`, agentID).Scan(&cur); err != nil {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cur, err := lockAgentPrompt(tx, agentID)
+	if err != nil {
 		return err
 	}
 	if cur.Valid {
 		return nil // already seeded or user-edited → leave it
 	}
-	_, err := d.SavePrompt(agentID, tmpl, "内置默认", "system")
-	return err
+	if _, err = appendAgentPrompt(tx, agentID, tmpl, "内置默认", "system"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ResetPromptToDefault appends the code-default template as a new version and
@@ -765,19 +772,37 @@ func (d *DB) SavePrompt(agentID int64, template, note, by string) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if _, err := lockAgentPrompt(tx, agentID); err != nil {
+		return 0, err
+	}
+	ver, err := appendAgentPrompt(tx, agentID, template, note, by)
+	if err != nil {
+		return 0, err
+	}
+	return ver, tx.Commit()
+}
+
+func lockAgentPrompt(tx *sql.Tx, agentID int64) (sql.NullInt64, error) {
+	var cur sql.NullInt64
+	if err := tx.QueryRow(`SELECT current_prompt_id FROM agents WHERE id=$1 FOR UPDATE`, agentID).Scan(&cur); err != nil {
+		return cur, err
+	}
+	return cur, nil
+}
+
+func appendAgentPrompt(tx *sql.Tx, agentID int64, template, note, by string) (int, error) {
 	var ver int
 	if err := tx.QueryRow(`SELECT COALESCE(max(version),0)+1 FROM agent_prompts WHERE agent_id=$1`, agentID).Scan(&ver); err != nil {
 		return 0, err
 	}
 	var pid int64
-	if err := tx.QueryRow(`INSERT INTO agent_prompts(agent_id,version,template_text,note,updated_by) VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,'')) RETURNING id`,
-		agentID, ver, template, note, by).Scan(&pid); err != nil {
+	if err := tx.QueryRow(`INSERT INTO agent_prompts(agent_id,version,template_text,note,updated_by) VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,'')) RETURNING id`, agentID, ver, template, note, by).Scan(&pid); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(`UPDATE agents SET current_prompt_id=$1 WHERE id=$2`, pid, agentID); err != nil {
 		return 0, err
 	}
-	return ver, tx.Commit()
+	return ver, nil
 }
 
 type PromptVersion struct {
