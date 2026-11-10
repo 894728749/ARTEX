@@ -4,6 +4,8 @@
 
 日期和时间均按北京时间（UTC+8）记录，区分源码快照、标签建立和 Release 发布时点。本文于 2026-11-10 补齐历史说明，保留原标签指向；下面的测试结果属于各版原验收记录，不表示本次重新运行了历史测试。上游 0.3.15 及更早的继承记录保留在 [CHANGELOG.md](CHANGELOG.md)，不代表本仓库另有对应正式 Release。研发过程中的“v2”是内部迭代名称，首个公开协作标签为 `artex-collaboration-v1`。
 
+<a id="main-unreleased"></a>
+
 ## `main`（未发布，2026-11-10）
 
 本轮为 `main` 上的协作可用性修复，不创建新 tag 或 Release。当前正式版仍是 `v0.5.0`。
@@ -40,6 +42,16 @@ go test -race ./server -run TestBranchRealNodeContinuousPlanningAndIndependentRe
 - 正式 `v0.5.0` tag、Release 与既有版本记录不改写；`main` 构建不替代在线更新的正式发布源。
 - 全量 server 测试有五项条件跳过：`TestLiveContextReview`、`TestReverseRealEngineAcceptance`、`TestReverseHermesV94MaterialAcceptance`、`TestBranchBrowserPreview`、`TestTeamOnboardingBrowserPreview`。团队浏览器预览另行启动并通过；真实外部逆向引擎未在本轮重跑。
 - 独立 TLS/Relay 入口不再提供管理员操作；管理员须使用原管理入口。任务基础与分支权限仍独立，不默认扩大授权；本次没有新增数据库迁移。
+
+### 干净源码构建与本机部署验收（2026-11-10）
+
+- 功能提交：[`edec98a`](https://github.com/cyy081021/ARTEX/commit/edec98a29b5816797adc37a1074b8ccd21b612d9)。从该提交的干净 Git 源码归档构建，复用本轮已通过静态导出与类型检查的前端；主程序及 Node 的构建版本均为 `0.5.0-main-edec98a`。这是 main 构建标识，不是新 tag。
+- 修正打包文档依赖后，Linux/Windows amd64 两份 ZIP 重新构建通过；CRC、SHA-256、主/节点程序和受跟踪文档、配置示例内容核对通过。两平台 Node 的 `-version` 均实际执行成功。没有运行完整 Windows 主服务。
+- 本机原 Windows/WSL 启动脚本完成停止、换装和重启；`/api/health` 返回 `0.5.0-main-edec98a`，脚本管理的后台会话保持运行。安装了同版本 Node 和接入文档，没有自动配对或启动执行节点。
+- 换装前确认任务、主 Agent 对话、报告队列和团队执行空闲，保存程序及可读取的数据库备份。换装后 43 张受保护业务表的行数和内容摘要一致（忽略 `updated_at`）；76,015 个证据文件的相对路径、数量、大小和修改时间一致。本项未重新计算每个证据文件的内容哈希。
+- 原有任务状态、模型/MCP/Agent 数据和私有配置保留，暂停任务没有恢复；原启动/停止脚本哈希一致。现有团队的删除资格和基础权限只读接口通过，未操作真实团队的删除或授权。
+- 主页面、任务页、团队页和设置页 HTTP 检查通过；团队页引用的 26 份脚本与构建产物逐字节相同，包含新权限、删除资格、协调器工作及连接模板入口。交互渲染另由上述隔离浏览器验收覆盖。
+- 本机换装不等于跨实体设备验收；成员 TLS 监听、端口转发、防火墙及真实模型/MCP 环境仍由使用者按[接入指南](docs/team-onboarding.md)配置。此轮只推送 main，不创建或移动 tag，不发布 Release 或容器镜像。
 
 ## `v0.5.0`
 
