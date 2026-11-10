@@ -22,6 +22,7 @@ package selfupdate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,17 @@ func writeMarker(path string, m marker) error {
 func cleanStaged(p Paths) {
 	_ = os.Remove(p.New)
 	_ = os.Remove(p.Sum)
+}
+
+// discardStaged 取消失败的升级，同时保留原始错误和所有清理错误。
+// 只移除指定升级文件，不递归删除目录，也不触碰当前程序与旧备份。
+func discardStaged(p Paths, cause error) error {
+	for _, path := range []string{p.Sum, p.New, p.Marker, p.New + ".part", p.New + ".zip.part"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cause = errors.Join(cause, fmt.Errorf("清理升级文件 %s: %w", path, err))
+		}
+	}
+	return cause
 }
 
 // CompareVersions 比较两个版本号，返回 -1/0/1（a<b / a==b / a>b）。

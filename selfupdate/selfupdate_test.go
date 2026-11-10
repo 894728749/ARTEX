@@ -185,6 +185,9 @@ func TestApplyStagedKeepsCurrentWhenVerifyFails(t *testing.T) {
 	fakeBin(t, p.Current, "old", 0)
 	stage(t, p, "new", 0)
 	fakeBin(t, p.New, "tampered", 0) // 破坏校验和
+	if err := writeMarker(p.Marker, marker{From: "0.3.7", To: "0.3.8"}); err != nil {
+		t.Fatal(err)
+	}
 
 	action, st := applyStaged(p)
 	if action != Continue {
@@ -192,6 +195,9 @@ func TestApplyStagedKeepsCurrentWhenVerifyFails(t *testing.T) {
 	}
 	if !st.FailedStage {
 		t.Error("状态应标记为 FailedStage")
+	}
+	if !strings.Contains(st.Detail, "SHA256") {
+		t.Errorf("应因二进制校验失败而拒绝，得到 %q", st.Detail)
 	}
 	if !strings.Contains(readAll(t, p.Current), "old") {
 		t.Fatal("校验失败时绝不能动当前版本")

@@ -43,14 +43,19 @@ type Progress func(ph Phase, pct int, msg string)
 // 只覆盖 zip，走 zip 不需要改 CI，也能兼容已经发布出去的历史版本；zip 里还带着
 // skills/，为将来同步内置 skill 留了口子。代价只是多下载 skills 那几百 KB。
 //
-// 函数返回即代表暂存完成，调用方随后优雅关闭并以 ExitRestart 退出。
+// 仅返回 nil 才代表暂存完成，调用方随后优雅关闭并以 ExitRestart 退出。
 func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion string, prog Progress) error {
-	if prog == nil {
-		prog = func(Phase, int, string) {}
-	}
 	p, err := ResolvePaths()
 	if err != nil {
 		return err
+	}
+	return stageRelease(ctx, c, rel, currentVersion, prog, p)
+}
+
+// stageRelease 接受显式路径，让隔离测试无需接触正在运行的可执行文件。
+func stageRelease(ctx context.Context, c *http.Client, rel *Release, currentVersion string, prog Progress, p Paths) error {
+	if prog == nil {
+		prog = func(Phase, int, string) {}
 	}
 	if err := checkWritable(p.Dir); err != nil {
 		return err
@@ -119,8 +124,7 @@ func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion str
 		To:       strings.TrimPrefix(rel.TagName, "v"),
 		StagedAt: time.Now().Unix(),
 	}); err != nil {
-		// 标记只影响自动回滚能力，暂存件本身已就位，不因此中断升级。
-		prog(PhaseStaged, -1, "警告：写入升级标记失败，本次升级将没有自动回滚保护")
+		return discardStaged(p, fmt.Errorf("写入升级标记失败，已取消升级: %w", err))
 	}
 
 	prog(PhaseStaged, 100, "新版本已就绪，正在重启…")

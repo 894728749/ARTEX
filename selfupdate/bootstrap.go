@@ -36,7 +36,7 @@ const (
 type State struct {
 	Pending     bool   // 换装后尚未确认稳定
 	RolledBack  bool   // 本次启动刚刚执行过自动回滚
-	FailedStage bool   // 暂存件校验/冒烟未通过，已丢弃
+	FailedStage bool   // 暂存件未能安全换装，详情含清理失败原因
 	Detail      string // 面向用户的一句话说明
 }
 
@@ -68,36 +68,38 @@ func Bootstrap() (Action, State) {
 	return confirmOrRollback(p, m)
 }
 
-// applyStaged 处理"存在暂存件"的局面：校验通过就换装，失败就丢弃。
+// applyStaged 处理"存在暂存件"的局面：标记可读写且校验通过才换装。
 //
 // 这里是整个升级链路唯一会覆盖可执行文件的地方，也是最后一道闸门——冒烟测试挡掉
 // 下载损坏、架构选错、动态链接缺失这类问题。一旦放行一个跑不起来的二进制，
 // 守护脚本会不知疲倦地反复拉起它，而 Go 代码根本没机会运行，自动回滚也就无从谈起。
 func applyStaged(p Paths) (Action, State) {
-	m, _ := readMarker(p.Marker)
+	reject := func(err error) (Action, State) {
+		err = discardStaged(p, err)
+		log.Printf("[update] 取消换装：%v", err)
+		return Continue, State{FailedStage: true, Detail: "更新已取消：" + err.Error()}
+	}
+	m, ok := readMarker(p.Marker)
+	if !ok {
+		return reject(errors.New("升级标记缺失或无法读取，拒绝换装"))
+	}
 
 	if err := verifyStaged(p); err != nil {
-		log.Printf("[update] 暂存的新版本未通过校验，已丢弃，继续运行当前版本：%v", err)
-		cleanStaged(p)
-		_ = os.Remove(p.Marker)
-		return Continue, State{FailedStage: true, Detail: "新版本校验失败，已丢弃：" + err.Error()}
+		return reject(fmt.Errorf("新版本校验失败: %w", err))
 	}
 
-	if err := swap(p); err != nil {
-		log.Printf("[update] 换装失败，继续运行当前版本：%v", err)
-		cleanStaged(p)
-		_ = os.Remove(p.Marker)
-		return Continue, State{FailedStage: true, Detail: "换装失败：" + err.Error()}
-	}
-
-	// 换装成功。保留标记，交给下一次启动（跑的就是新版）确认是否稳定。
+	// 必须在覆盖当前程序之前写好回滚状态；写入失败时保留当前程序和旧备份。
 	m.Attempts = 0
 	if m.StagedAt == 0 {
 		m.StagedAt = time.Now().Unix()
 	}
 	if err := writeMarker(p.Marker, m); err != nil {
-		log.Printf("[update] 写升级标记失败（失去自动回滚能力）：%v", err)
+		return reject(fmt.Errorf("写入升级标记失败，拒绝换装: %w", err))
 	}
+	if err := swap(p); err != nil {
+		return reject(fmt.Errorf("换装失败: %w", err))
+	}
+	// 保留已写好的标记，交给新版启动确认；换装后不再进行可能截断标记的写入。
 	log.Printf("[update] 已换装到 %s，退出以重启（exit %d）", orUnknown(m.To), ExitRestart)
 	return Restart, State{Pending: true}
 }
