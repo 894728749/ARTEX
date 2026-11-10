@@ -22,11 +22,15 @@ func TestTeamOnboardingBrowserPreview(t *testing.T) {
 	if output == "" {
 		t.Skip("manual browser fixture is opt-in")
 	}
-	if !strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=usability_preview") {
-		t.Skip("requires dedicated usability_preview database")
+	if !strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=usability_preview") && !strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=onboarding_preview") {
+		t.Skip("requires dedicated usability_preview or onboarding_preview database")
 	}
 	s, task, _ := workflowFixture(t)
 	ctx := context.Background()
+	if strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=onboarding_preview") {
+		closeAccess := s.ConfigureTeamOnboarding(ctx, s.m.dir, os.Getenv("ARTEX_NODE_BUNDLE_DIR"), false)
+		defer closeAccess()
+	}
 	pg := s.m.pg
 	tid := mustTaskID(t, task.ID)
 	if err := pg.SetPaused(tid, true); err != nil {

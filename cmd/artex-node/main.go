@@ -43,6 +43,7 @@ type nodeConfig struct {
 }
 type deviceState struct {
 	CoordinatorURL string          `json:"coordinator_url"`
+	TeamID         int64           `json:"team_id"`
 	Token          string          `json:"device_token"`
 	Device         json.RawMessage `json:"device"`
 }
@@ -196,6 +197,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	statePath := flags.String("state", "node-state/identity.json", "private device identity file")
 	name := flags.String("name", "", "device display name")
 	showVersion := flags.Bool("version", false, "print node build and protocol versions")
+	joinPath := flags.String("join", "join.json", "team onboarding join configuration")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("usage: artex-node [-version] -config node.json -state node-state/identity.json [-name device] check|pair|status|run|run-once")
 	}
@@ -204,7 +206,10 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return nil
 	}
 	if flags.NArg() != 1 {
-		return errors.New("choose check, pair, status, run, or run-once")
+		return errors.New("choose setup, check, pair, status, run, or run-once")
+	}
+	if flags.Arg(0) == "setup" {
+		return runSetup(ctx, *joinPath, *configPath, *statePath, *name, in, out)
 	}
 	data, err := os.ReadFile(*configPath)
 	if err != nil {

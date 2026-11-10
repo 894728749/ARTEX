@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { TeamOnboardingWizard } from "@/components/team-onboarding-wizard";
 
 export function TeamConnectionGuide({ team, admin }: { team: string; admin: boolean }) {
   const [origin, setOrigin] = React.useState("");
@@ -27,7 +28,7 @@ export function TeamConnectionGuide({ team, admin }: { team: string; admin: bool
       setNotice("连接模板已下载；请放入已核对来源的证书，运行 check 验证。模板不含配对码、设备身份、模型密钥或执行授权。");
     } catch (e) { setError((e as Error).message); }
   }
-  return <Card><CardHeader><CardTitle>跨设备接入</CardTitle></CardHeader><CardContent className="space-y-4">
+  return <div className="space-y-4"><TeamOnboardingWizard key={`${team}-${admin}`} team={team} admin={admin} /><Card><CardHeader><CardTitle>高级手动 LAN / Relay 接入</CardTitle></CardHeader><CardContent className="space-y-4">
     <p className="text-sm">团队编号 <strong>{team}</strong>。成员使用团队账号登录网页；执行设备使用独立 Node 身份，两者分别授权。</p>
     {current.startsWith("http:") && <p role="status" className="rounded-md border p-3 text-sm">当前是 {current}。此地址不能直接用作 Node 的 HTTPS 协调端；localhost 也不能供另一台设备访问。</p>}
     <details className="rounded-md border p-3"><summary className="cursor-pointer py-1 font-medium">接入步骤与地址配置</summary><div className="mt-3 space-y-4 text-sm">
@@ -45,5 +46,5 @@ export function TeamConnectionGuide({ team, admin }: { team: string; admin: bool
       <p className="text-xs text-muted-foreground">此处只生成文件，不会开放端口、修改服务器设置或探测输入地址。连通性以 Node check 的实际结果为准。</p>
       {error && <p role="alert" className="text-destructive">{error}</p>}{notice && <p role="status">{notice}</p>}
     </div></details>
-  </CardContent></Card>;
+  </CardContent></Card></div>;
 }

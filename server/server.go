@@ -25,6 +25,7 @@ import (
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
+	"github.com/Autumn-27/artex/teamsetup"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
@@ -118,9 +119,11 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake chan struct{}
-	archiveWG   sync.WaitGroup
-	side        *sideQuestionState
+	archiveWake  chan struct{}
+	archiveWG    sync.WaitGroup
+	side         *sideQuestionState
+	teamAccess   *teamsetup.Controller // configured once, before accepting HTTP requests
+	onboardingAI sync.Mutex
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -681,6 +684,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/teams", s.teamList)
+	s.teamOnboardingRoutes(mux)
 	mux.HandleFunc("POST /api/teams", s.teamCreate)
 	mux.HandleFunc("GET /api/teams/{team}/deletion-eligibility", s.teamDeletionEligibility)
 	mux.HandleFunc("DELETE /api/teams/{team}", s.teamDelete)

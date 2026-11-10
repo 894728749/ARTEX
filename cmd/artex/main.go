@@ -145,6 +145,8 @@ func run() int {
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
+	closeTeamAccess := srv.ConfigureTeamOnboarding(ctx, *dataDir, filepath.Join(config.BaseDir(), "node-binaries"), *tlsCert != "" || *teamAddr != "" || *relayURL != "")
+	defer closeTeamAccess()
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

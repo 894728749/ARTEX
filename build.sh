@@ -8,6 +8,7 @@
 #   ARTEX_TARGET_OS=linux             One target OS in single-target mode.
 #   ARTEX_TARGET_ARCH=amd64           One target arch in single-target mode.
 #   ARTEX_TARGETS=linux/amd64,...     Comma-separated targets for multi-target mode.
+#   ARTEX_NODE_TARGETS=linux/amd64,... Platforms bundled under node-binaries/.
 #   ARTEX_BUILD_VERSION=v0.3.3        Version embedded in the binary and archive name.
 #   ARTEX_OUTPUT=/path/to/artex       Explicit binary path in single-target mode.
 #   ARTEX_OUTPUT_DIR=dist             Directory for default binary paths.
@@ -47,9 +48,11 @@ EOF
 }
 
 RELEASE_TARGETS_DEFAULT="linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64"
+NODE_TARGETS_DEFAULT="linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64"
 ARTEX_RELEASE="${ARTEX_RELEASE:-0}"
 ARTEX_COMPRESS="${ARTEX_COMPRESS:-off}"
 ARTEX_PACKAGE="${ARTEX_PACKAGE:-0}"
+ARTEX_NODE_TARGETS="${ARTEX_NODE_TARGETS:-$NODE_TARGETS_DEFAULT}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -99,6 +102,9 @@ if [ -z "${ARTEX_BUILD_VERSION:-}" ]; then
 fi
 # Release tags are commonly passed as v0.3.3; keep the binary version consistent.
 ARTEX_BUILD_VERSION="${ARTEX_BUILD_VERSION#v}"
+case "$ARTEX_BUILD_VERSION" in
+  ''|*[!A-Za-z0-9._+-]*) die "版本只能包含 ASCII 字母、数字、点、下划线、加号和连字符，避免生成无效清单 JSON" ;;
+esac
 ARTEX_OUTPUT_DIR="${ARTEX_OUTPUT_DIR:-dist}"
 ARTEX_PACKAGE_DIR="${ARTEX_PACKAGE_DIR:-$ARTEX_OUTPUT_DIR}"
 ARTEX_UPX_ARGS="${ARTEX_UPX_ARGS:---best --lzma}"
@@ -176,10 +182,12 @@ package_binary() {
   node_name="artex-node"
   [ "$goos" = "windows" ] && node_name="artex-node.exe"
   cp "$(dirname "$binary")/$node_name" "$package_root/"
+  [ -d "$(dirname "$binary")/node-binaries" ] || die "缺少同版本 node-binaries 资源目录"
+  cp -R "$(dirname "$binary")/node-binaries" "$package_root/"
   mkdir -p "$package_root/examples" "$package_root/docs"
   cp examples/team-node*.json "$package_root/examples/"
   cp examples/README.md "$package_root/examples/"
-  cp docs/team-onboarding.md docs/team-branches.md docs/team-shared-messages.md "$package_root/docs/"
+  cp docs/team-onboarding.md docs/team-onboarding-validation.md docs/team-branches.md docs/team-shared-messages.md "$package_root/docs/"
   # 守护启动脚本是正式入口：页面上的一键更新要靠它在进程退出后重新拉起，
   # 直接跑 artex 本体的话更新完就再也起不来了。按目标系统只带对应的那一份。
   if [ "$goos" = "windows" ]; then
@@ -194,6 +202,83 @@ package_binary() {
   (cd "$ARTEX_PACKAGE_DIR" && zip -q -r -9 "$(basename "$archive")" "$(basename "$package_root")")
   rm -rf "$package_root"
   ok "Release 压缩包：$archive"
+}
+
+node_binary_name() {
+  local target="$1" name
+  name="artex-node-${target//\//-}"
+  [ "${target%%/*}" = "windows" ] && name="$name.exe"
+  printf '%s\n' "$name"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die "生成 Node 资源清单需要 sha256sum 或 shasum"
+  fi
+}
+
+build_node_binaries() {
+  local target goos goarch file sum index=0 count="${#node_manifest_targets[@]}"
+  printf '{\n  "version": "%s",\n  "binaries": [\n' "$ARTEX_BUILD_VERSION" > "$node_cache_dir/manifest.json.tmp"
+  for target in "${node_manifest_targets[@]}"; do
+    goos="${target%%/*}"
+    goarch="${target##*/}"
+    file="$(node_binary_name "$target")"
+    info "编译成员 Node ${goos}/${goarch}，版本 ${ARTEX_BUILD_VERSION}"
+    GOSUMDB="$ARTEX_GOSUMDB" CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      go build -trimpath -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION}" \
+      -o "$node_cache_dir/$file" ./cmd/artex-node
+    sum="$(sha256_file "$node_cache_dir/$file")"
+    case "$sum" in *[!0-9a-fA-F]*|'') die "无法计算 Node SHA256：$file" ;; esac
+    [ "${#sum}" -eq 64 ] || die "Node SHA256 长度无效：$file"
+    if [ "$index" -gt 0 ]; then printf ',\n' >> "$node_cache_dir/manifest.json.tmp"; fi
+    printf '    {"platform":"%s","file":"%s","sha256":"%s"}' \
+      "${target//\//-}" "$file" "$sum" >> "$node_cache_dir/manifest.json.tmp"
+    index=$((index + 1))
+  done
+  [ "$index" -eq "$count" ] || die "Node manifest 条目数量不匹配"
+  printf '\n  ]\n}\n' >> "$node_cache_dir/manifest.json.tmp"
+  mv "$node_cache_dir/manifest.json.tmp" "$node_cache_dir/manifest.json"
+  ok "已生成 Node 资源清单（$index 个平台，版本 $ARTEX_BUILD_VERSION）"
+}
+
+stage_node_resources() {
+  local output="$1" output_target_os="$2" output_target_arch="$3" target file source main_dir resources
+  main_dir="$(cd "$(dirname "$output")" && pwd -P)"
+  [ -n "$main_dir" ] && [ "$main_dir" != "/" ] || die "拒绝在文件系统根目录创建 Node 资源目录"
+  resources="$main_dir/node-binaries"
+  case "$resources" in "$main_dir"/node-binaries) ;; *) die "Node 资源目录超出主端输出目录" ;; esac
+  if [ -L "$resources" ]; then die "拒绝覆盖符号链接 Node 资源目录：$resources"; fi
+  if [ -e "$resources" ]; then
+    [ -d "$resources" ] || die "Node 资源目标已存在且不是目录：$resources"
+    # 此固定路径已限定在本次主端二进制的 dirname 下。
+    rm -rf -- "$resources"
+  fi
+  mkdir -p "$resources"
+  for target in "${node_manifest_targets[@]}"; do
+    file="$(node_binary_name "$target")"
+    source="$node_cache_dir/$file"
+    [ -f "$source" ] || die "本次构建缺少 Node 平台资源：$target"
+    cp "$source" "$resources/$file"
+  done
+  # 最后写入清单，避免它引用上一次构建的资源。
+  cp "$node_cache_dir/manifest.json" "$resources/manifest.json"
+  target="${output_target_os}/${output_target_arch}"
+  file="artex-node"
+  [ "$output_target_os" = "windows" ] && file="artex-node.exe"
+  source="$node_cache_dir/$(node_binary_name "$target")"
+  if [ ! -f "$source" ]; then
+    info "编译主端同目标 Node ${output_target_os}/${output_target_arch}（未纳入平台资源清单）"
+    GOSUMDB="$ARTEX_GOSUMDB" CGO_ENABLED=0 GOOS="$output_target_os" GOARCH="$output_target_arch" \
+      go build -trimpath -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION}" \
+      -o "$source" ./cmd/artex-node
+  fi
+  [ -f "$source" ] || die "本次构建缺少同目标 Node 可执行文件：$target"
+  cp "$source" "$main_dir/$file"
 }
 
 build_target() {
@@ -231,11 +316,7 @@ build_target() {
     ./cmd/artex
 
   compress_binary "$output" "$goos"
-  node_name="artex-node"
-  [ "$goos" = "windows" ] && node_name="artex-node.exe"
-  GOSUMDB="$ARTEX_GOSUMDB" CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION}" \
-    -o "$(dirname "$output")/$node_name" ./cmd/artex-node
+  stage_node_resources "$output" "$goos" "$goarch"
   if command -v file >/dev/null 2>&1; then file "$output"; fi
   if [ "$ARTEX_PACKAGE" = "1" ]; then package_binary "$output" "$goos" "$goarch"; fi
   ok "编译完成：$output"
@@ -257,14 +338,52 @@ write_checksums() {
 
 mkdir -p "$ARTEX_OUTPUT_DIR"
 if [ "$ARTEX_PACKAGE" = "1" ]; then mkdir -p "$ARTEX_PACKAGE_DIR"; fi
+ARTEX_OUTPUT_ROOT="$(cd "$ARTEX_OUTPUT_DIR" && pwd -P)"
+[ "$ARTEX_OUTPUT_ROOT" != "/" ] || die "ARTEX_OUTPUT_DIR 不能是文件系统根目录"
 
 old_ifs="$IFS"
 IFS=','
 read -r -a targets <<< "$ARTEX_TARGETS"
+read -r -a raw_node_targets <<< "$ARTEX_NODE_TARGETS"
 IFS="$old_ifs"
-[ "${#targets[@]}" -gt 0 ] || die "ARTEX_TARGETS 不能为空"
+normalized_targets=()
 for target in "${targets[@]}"; do
   target="${target//[[:space:]]/}"
+  [ -n "$target" ] && normalized_targets+=("$target")
+done
+targets=("${normalized_targets[@]}")
+[ "${#targets[@]}" -gt 0 ] || die "ARTEX_TARGETS 不能为空"
+
+node_manifest_targets=()
+for target in "${raw_node_targets[@]}"; do
+  target="${target//[[:space:]]/}"
+  [ -n "$target" ] || continue
+  case "$target" in
+    linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64) ;;
+    *) die "ARTEX_NODE_TARGETS 不支持目标：$target" ;;
+  esac
+  duplicate=0
+  for existing in "${node_manifest_targets[@]}"; do
+    [ "$existing" = "$target" ] && duplicate=1
+  done
+  [ "$duplicate" = "1" ] || node_manifest_targets+=("$target")
+done
+[ "${#node_manifest_targets[@]}" -gt 0 ] || die "ARTEX_NODE_TARGETS 不能为空"
+
+node_cache_dir="$(mktemp -d "$ARTEX_OUTPUT_ROOT/.artex-node-binaries.XXXXXX")"
+cleanup_node_cache() {
+  [ -n "${node_cache_dir:-}" ] || return 0
+  case "$node_cache_dir" in
+    "$ARTEX_OUTPUT_ROOT"/.artex-node-binaries.*)
+      [ -d "$node_cache_dir" ] && [ ! -L "$node_cache_dir" ] && rm -rf -- "$node_cache_dir"
+      ;;
+    *) warn "跳过清理路径范围外的临时目录：$node_cache_dir" ;;
+  esac
+}
+trap cleanup_node_cache EXIT
+build_node_binaries
+
+for target in "${targets[@]}"; do
   [ -n "$target" ] || continue
   build_target "$target"
 done
