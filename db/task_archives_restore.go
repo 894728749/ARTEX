@@ -84,6 +84,14 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM team_resources WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	// Archived branches are restored as provenance, never as live leases, node
+	// permissions or budgets capable of starting a tool automatically.
+	if _, err := tx.Exec(`DELETE FROM team_branch_projects WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM team_branch_workflow_requests WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	// These read-only snapshots are already durably stored in the checked
 	// archive package. Restore them with the rest of the task, not into hot storage.
 	if _, err := tx.Exec(`DELETE FROM task_team_history WHERE task_id=$1`, taskID); err != nil {

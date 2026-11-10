@@ -40,6 +40,7 @@ type localExecutionConfig struct {
 	MCPServers      map[string]localMCPServer      `json:"mcp_servers,omitempty"`
 	MCPTools        map[string]localMCPTool        `json:"mcp_tools,omitempty"`
 	RuntimeProfiles map[string]localRuntimeProfile `json:"runtime_profiles,omitempty"`
+	Branches        localBranchConfig              `json:"branches,omitempty"`
 	WorkDir         string                         `json:"work_dir"`
 	OutboxDir       string                         `json:"outbox_dir"`
 }
@@ -147,8 +148,14 @@ func (c localExecutionConfig) validate() error {
 		if _, ok := c.Models[r.Model]; !ok {
 			return fmt.Errorf("role %q references unknown model", role)
 		}
-		if role != "worker" && role != "reverse_static" && role != "reverse_dynamic" && role != "reverse_reviewer" {
+		if role != "worker" && role != "reverse_static" && role != "reverse_dynamic" && role != "reverse_reviewer" && role != "planner" && role != "reverse_planner" && role != "reviewer" {
 			return fmt.Errorf("unsupported role %q", role)
+		}
+		if (role == "planner" || role == "reverse_planner") && len(r.Capabilities) != 0 {
+			return fmt.Errorf("role %s cannot have execution capabilities", role)
+		}
+		if (role == "planner" || role == "reverse_planner" || role == "reviewer") && !c.Branches.Enabled {
+			return fmt.Errorf("role %s requires branch protocol opt-in", role)
 		}
 		seen := map[string]bool{}
 		if role == "reverse_dynamic" {
@@ -224,7 +231,7 @@ func (c localExecutionConfig) validate() error {
 			}
 		}
 	}
-	return nil
+	return c.validateBranches()
 }
 
 type nodeEvidence struct {
@@ -552,6 +559,9 @@ func runAssignments(ctx context.Context, cfg localExecutionConfig, statePath, or
 	for role, r := range cfg.Roles {
 		roles = append(roles, role)
 		roleCaps[role] = append([]string{}, r.Capabilities...)
+		if role == "planner" || role == "reverse_planner" {
+			continue
+		}
 		caps = append(caps, r.Capabilities...)
 		if role == "reverse_dynamic" {
 			if !containsString(r.Capabilities, reverseRuntimeCapability) {
@@ -579,7 +589,11 @@ func runAssignments(ctx context.Context, cfg localExecutionConfig, statePath, or
 	var response assignmentList
 	backoff := time.Second
 	for {
-		err = request(ctx, client, origin, "/api/collaboration/device/capabilities", state.Token, map[string]any{"capabilities": map[string]any{"version": 1, "execution_enabled": true, "roles": roles, "capabilities": caps, "role_capabilities": roleCaps, "runtime_profiles": runtimeProfiles}}, nil)
+		capabilityDoc := map[string]any{"version": 1, "message_protocol": 1, "execution_enabled": true, "roles": roles, "capabilities": caps, "role_capabilities": roleCaps, "runtime_profiles": runtimeProfiles}
+		if cfg.Branches.Enabled {
+			capabilityDoc["branch_protocol"] = collab.BranchProtocol
+		}
+		err = request(ctx, client, origin, "/api/collaboration/device/capabilities", state.Token, map[string]any{"capabilities": capabilityDoc}, nil)
 		if err == nil {
 			break
 		}
@@ -605,6 +619,14 @@ func runAssignments(ctx context.Context, cfg localExecutionConfig, statePath, or
 			}
 			backoff = nextNodeBackoff(backoff)
 			continue
+		}
+		if cfg.Branches.Enabled {
+			if branchErr := pollBranches(ctx, cfg, origin, state.Token, client, once); branchErr != nil {
+				if once || !isTransientNodeError(branchErr) {
+					return branchErr
+				}
+				fmt.Fprintf(out, "branch retry pending: %v\n", branchErr)
+			}
 		}
 		if err = request(ctx, client, origin, "/api/collaboration/device/assignments", state.Token, nil, &response); err != nil {
 			if once || !isTransientNodeError(err) {
@@ -771,6 +793,9 @@ func executeAssignment(parent context.Context, cfg localExecutionConfig, a colla
 	if err := a.Validate(); err != nil {
 		return err
 	}
+	if a.Config.MessageProtocol > 1 {
+		return fmt.Errorf("unsupported assignment message protocol %d", a.Config.MessageProtocol)
+	}
 	role, ok := cfg.Roles[a.Config.Role]
 	if !ok {
 		return errors.New("assignment role is not configured on this device")
@@ -860,6 +885,10 @@ func executeAssignment(parent context.Context, cfg localExecutionConfig, a colla
 	var ev nodeEvidence
 	ev.stop = cancel
 	ev.journal = filepath.Join(work, "evidence.ndjson")
+	var messages *nodeMessageBridge
+	if a.Config.MessageProtocol == 1 {
+		messages = newNodeMessageBridge(a, client, origin, token, filepath.Join(work, "messages.ndjson"), cancel)
+	}
 	var hbMu sync.Mutex
 	hbErr := error(nil)
 	heartbeat := func() error {
@@ -982,25 +1011,93 @@ func executeAssignment(parent context.Context, cfg localExecutionConfig, a colla
 	if err != nil {
 		return submitNodeResult(parent, cfg, a, collab.ExecutionResult{Version: 1, Outcome: "failed", Summary: "Local model provider could not be initialized.", Checkpoint: truncateNodeText(err.Error(), 2048), Role: a.Config.Role, Model: model.Model}, origin, token, client)
 	}
+	if messages != nil {
+		provider = &nodeMessageProvider{inner: provider, beforeCall: messages.BeginModelCall}
+	}
 	key = ""
 	_ = key
 	input := renderAssignmentInput(a, files)
 	opts := agentcore.Options{Provider: provider, SystemPrompt: []string{a.Config.SystemPrompt, "You are a bounded device worker. Produce candidate evidence only. The coordinator performs independent business acceptance. Never claim a finding or goal is accepted."}, Tools: tools, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: a.Config.MaxTurns, MaxDuration: time.Duration(a.Config.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false}
+	if messages != nil {
+		opts.Hooks = &nodeMessageHooks{bridge: messages}
+	}
 	session := agentcore.NewSession(opts)
 	var summary strings.Builder
 	var agentRunErr error
-	for event, runErr := range session.Prompt(ctx, input) {
-		if runErr != nil {
-			if ctx.Err() != nil {
+	promptInput := input
+	if messages != nil {
+		initial, startErr := messages.Start(ctx)
+		if startErr != nil {
+			agentRunErr = startErr
+		} else if initial.Sealed {
+			agentRunErr = errors.New("coordinator sealed the team message channel before the model started")
+		} else if len(initial.Guidance) > 0 {
+			promptInput += "\n\n" + renderNodeGuidance(initial.Guidance)
+		}
+	}
+	for continuation := 0; agentRunErr == nil; continuation++ {
+		var textChunk strings.Builder
+		var terminalText string
+		observedTextBoundary := uint64(0)
+		if messages != nil {
+			observedTextBoundary = messages.TextBoundary()
+		}
+		flushText := func() {
+			if messages != nil && textChunk.Len() > 0 {
+				messages.addText(textChunk.String())
+			}
+			textChunk.Reset()
+		}
+		for event, runErr := range session.Prompt(ctx, promptInput) {
+			if messages != nil {
+				if boundary := messages.TextBoundary(); boundary != observedTextBoundary {
+					textChunk.Reset()
+					observedTextBoundary = boundary
+				}
+			}
+			if runErr != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				agentRunErr = runErr
+				summary.WriteString("\nAgent error: ")
+				summary.WriteString(runErr.Error())
 				break
 			}
-			agentRunErr = runErr
-			summary.WriteString("\nAgent error: ")
-			summary.WriteString(runErr.Error())
+			switch event.Kind {
+			case harness.KindText:
+				textChunk.WriteString(event.Text)
+				summary.WriteString(truncateNodeText(event.Text, max(0, (64<<10)-summary.Len())))
+			case harness.KindToolUse:
+				// KindText is a stream of deltas. Upload one complete text segment at
+				// the next tool boundary, never one coordinator record per token.
+				flushText()
+			case harness.KindResult:
+				if event.Terminal != nil {
+					terminalText = event.Terminal.Text
+					if event.Terminal.Err != nil {
+						agentRunErr = event.Terminal.Err
+					}
+				}
+			}
+		}
+		if messages == nil || ctx.Err() != nil || agentRunErr != nil {
 			break
 		}
-		if event.Kind == harness.KindText {
-			summary.WriteString(truncateNodeText(event.Text, max(0, (64<<10)-summary.Len())))
+		// Stop hooks normally seal the channel. KindResult is the fallback for SDK
+		// paths that finish without invoking Stop (including stop-hook continuation
+		// suppression); it carries the authoritative final answer text.
+		reply, syncErr := messages.FinishPrompt(ctx, terminalText)
+		if syncErr != nil || reply.Sealed {
+			break
+		}
+		if continuation >= maxMessageGuidanceContinuations {
+			break
+		}
+		if len(reply.Guidance) > 0 {
+			promptInput = renderNodeGuidance(reply.Guidance)
+		} else {
+			promptInput = "Coordinator has not sealed the message channel yet; check for pending guidance before ending."
 		}
 	}
 	session.Close()
@@ -1019,12 +1116,18 @@ func executeAssignment(parent context.Context, cfg localExecutionConfig, a colla
 	if ctx.Err() != nil {
 		outcome = "blocked"
 	}
-	result := collab.ExecutionResult{Version: 1, Outcome: outcome, Summary: truncateNodeText(text, 64<<10), Checkpoint: func() string {
+	checkpoint := func() string {
 		if outcome == "blocked" {
 			return "stopped before any further tool call; preserve directory and reassign with explicit recovery"
 		}
 		return ""
-	}(), Role: a.Config.Role, Model: model.Model, Evidence: ev.list()}
+	}()
+	if messages != nil && messages.Error() != nil {
+		outcome = "blocked"
+		text = "Team message exchange failed; local message journal was preserved. " + text
+		checkpoint = "team message exchange failed or the message channel did not seal; inspect messages.ndjson; automatic tool replay is disabled"
+	}
+	result := collab.ExecutionResult{Version: 1, Outcome: outcome, Summary: truncateNodeText(text, 64<<10), Checkpoint: checkpoint, Role: a.Config.Role, Model: model.Model, Evidence: ev.list()}
 	return submitNodeResult(parent, cfg, a, result, origin, token, client)
 }
 

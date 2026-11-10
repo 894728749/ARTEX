@@ -853,6 +853,31 @@ export interface LogLine {
 export type SessionRole = "mainagent" | "planner" | "worker" | "system";
 export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped" | "deleted";
 
+// Shared team chat is intentionally limited to user guidance and text replies;
+// tool calls and reasoning are not exposed through this transport.
+export interface TeamSession {
+  id: string;
+  title: string;
+  state: string;
+  executor_id: number; // 0 = local machine, positive = paired device ID
+  executor_name: string;
+  team_id: number;
+  assignment_id: number;
+  epoch: number;
+  can_message: boolean;
+  reason?: string;
+}
+
+export interface TeamSessionMessage {
+  id: number;
+  kind: "user" | "text";
+  text: string;
+  created_at: string;
+  executor_id: number;
+  member_id: number;
+  guidance_status?: "pending" | "delivered" | "closed";
+}
+
 // Daily token aggregate bucket (GET /api/tokens/daily).
 export interface DailyTokenBucket {
   date: string; // "YYYY-MM-DD"

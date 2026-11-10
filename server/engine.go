@@ -780,6 +780,14 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
+	// Branch-mode planning belongs to explicitly claimed execution nodes. It
+	// must never also start the legacy automatic Planner/Worker pool.
+	if e.m != nil && e.m.pg != nil {
+		id, _ := strconv.ParseInt(t.ID, 10, 64)
+		if enabled, err := e.m.pg.BranchMode(ctx, id); err != nil || enabled {
+			return
+		}
+	}
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {

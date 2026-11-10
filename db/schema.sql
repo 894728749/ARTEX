@@ -1529,6 +1529,20 @@ CREATE TABLE IF NOT EXISTS workflow_requests (
 CREATE INDEX IF NOT EXISTS idx_workflow_requests_source ON workflow_requests(source_task_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_requests_target ON workflow_requests(target_task_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_requests_pending_expiry ON workflow_requests(expires_at) WHERE status='pending';
+
+-- Branch assistance shares the ID sequence, not legacy task-to-task scheduling.
+-- This prevents legacy expiry workers from accidentally driving branch tasks.
+CREATE TABLE IF NOT EXISTS team_branch_workflow_requests (
+ id BIGINT PRIMARY KEY DEFAULT nextval('workflow_requests_id_seq'),
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ work_id BIGINT NOT NULL,
+ source_branch_id BIGINT NOT NULL,
+ target_branch_id BIGINT,
+ status TEXT NOT NULL,
+ input_snapshot JSONB NOT NULL,
+ result JSONB,
+ UNIQUE(task_id,work_id)
+);
 DROP TRIGGER IF EXISTS trg_workflow_requests_upd ON workflow_requests;
 CREATE TRIGGER trg_workflow_requests_upd BEFORE UPDATE ON workflow_requests
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -1609,6 +1623,45 @@ DROP INDEX IF EXISTS uq_team_active_member_resource;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_team_active_team_resource ON team_execution_assignments(team_id,resource_key) WHERE state IN ('assigned','claimed','running') AND resource_key<>'';
 CREATE INDEX IF NOT EXISTS idx_team_assignment_poll ON team_execution_assignments(device_id,state,created_at) WHERE state='assigned';
 CREATE INDEX IF NOT EXISTS idx_team_assignment_lease ON team_execution_assignments(lease_until) WHERE state IN ('assigned','claimed','running');
+
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS messages_ready BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE team_execution_assignments ADD COLUMN IF NOT EXISTS messages_closed BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS team_execution_messages (
+ id BIGSERIAL PRIMARY KEY,
+ assignment_id BIGINT NOT NULL REFERENCES team_execution_assignments(id) ON DELETE CASCADE,
+ epoch BIGINT NOT NULL,
+ direction TEXT NOT NULL CHECK(direction IN ('user','text')),
+ dedup_key TEXT NOT NULL,
+ body TEXT NOT NULL,
+ member_id BIGINT NOT NULL DEFAULT 0,
+ activity_id BIGINT REFERENCES activity(id) ON DELETE SET NULL,
+ delivered_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(assignment_id,epoch,direction,dedup_key)
+);
+-- Opt-in branch collaboration is separate from legacy single-task execution.
+-- The project row serializes claims, budget reservations and event ordering.
+CREATE TABLE IF NOT EXISTS team_branch_projects (
+ task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+ team_id BIGINT NOT NULL,
+ state JSONB NOT NULL CHECK(jsonb_typeof(state)='object'),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ FOREIGN KEY(team_id,task_id) REFERENCES team_tasks(team_id,task_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS team_branch_resource_clock (
+ team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ resource_key TEXT NOT NULL,
+ last_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(team_id,resource_key)
+);
+CREATE TABLE IF NOT EXISTS team_branch_events (
+ task_id BIGINT NOT NULL REFERENCES team_branch_projects(task_id) ON DELETE CASCADE,
+ seq BIGINT NOT NULL, branch_id BIGINT NOT NULL DEFAULT 0,
+ event JSONB NOT NULL CHECK(jsonb_typeof(event)='object'),
+ PRIMARY KEY(task_id,seq)
+);
+CREATE INDEX IF NOT EXISTS idx_branch_events_branch ON team_branch_events(task_id,branch_id,seq);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_message_activity ON team_execution_messages(activity_id) WHERE activity_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS team_resources (
  id BIGSERIAL PRIMARY KEY, team_id BIGINT NOT NULL, task_id BIGINT NOT NULL,
  resource_key TEXT NOT NULL CHECK(length(resource_key) BETWEEN 1 AND 200), value JSONB NOT NULL,

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/collab"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -476,6 +477,12 @@ func (d *DB) createTeamExecutionAssignment(ctx context.Context, teamID, taskID, 
 	}
 	resource, _ := contract["resource_key"].(string)
 	if resource != "" {
+		if e = lockBranchResources(ctx, tx, teamID); e != nil {
+			return nil, e
+		}
+		if e = branchResourceBusy(ctx, tx, teamID, 0, 0, []string{resource}); e != nil {
+			return nil, e
+		}
 		var busy bool
 		e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state='running' AND payload->'contract'->>'resource_key'=$2)`, expID, resource).Scan(&busy)
 		if e != nil {
@@ -563,7 +570,7 @@ func (d *DB) PollTeamExecutionAssignments(ctx context.Context, deviceID int64, t
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	rows, e := d.QueryContext(ctx, `SELECT a.`+strings.ReplaceAll(teamAssignmentBaseCols, ",", `,a.`)+` FROM team_execution_assignments a JOIN team_devices d ON d.id=a.device_id AND d.revoked_at IS NULL AND d.owner_member_id=a.member_id JOIN exploration_nodes n ON n.id=a.intent_id WHERE a.device_id=$1 AND d.token_hash=$2 AND a.state IN ('assigned','claimed','running') AND a.lease_until>now() AND n.payload->'contract'->>'remote_assignment_pending'='true' AND n.payload->'contract'->>'remote_device_id'=a.device_id::text AND n.payload->'contract'->>'remote_epoch'=a.epoch::text AND EXISTS(SELECT 1 FROM team_members m JOIN team_task_permissions p ON p.member_id=m.id AND p.team_id=m.team_id AND p.task_id=a.task_id AND p.permission='execute' WHERE m.id=a.member_id AND m.team_id=a.team_id AND m.revoked_at IS NULL) AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=a.task_id AND t.deleted_at IS NULL AND NOT t.paused AND NOT t.queued AND t.status NOT IN ('paused','finalizing','done','failed','timeout')) AND (COALESCE(n.payload->'contract'->>'workflow_request_id','0')='0' OR EXISTS(SELECT 1 FROM workflow_requests wr WHERE wr.id=(n.payload->'contract'->>'workflow_request_id')::bigint AND wr.target_task_id=a.task_id AND wr.status='pending' AND wr.expires_at>now())) ORDER BY a.created_at LIMIT $3`, deviceID, teamHash(token), limit)
+	rows, e := d.QueryContext(ctx, `SELECT a.`+strings.ReplaceAll(teamAssignmentBaseCols, ",", `,a.`)+` FROM team_execution_assignments a JOIN team_devices d ON d.id=a.device_id AND d.revoked_at IS NULL AND d.owner_member_id=a.member_id JOIN exploration_nodes n ON n.id=a.intent_id WHERE a.device_id=$1 AND d.token_hash=$2 AND a.state IN ('assigned','claimed','running') AND a.lease_until>now() AND n.payload->'contract'->>'remote_assignment_pending'='true' AND n.payload->'contract'->>'remote_device_id'=a.device_id::text AND n.payload->'contract'->>'remote_epoch'=a.epoch::text AND EXISTS(SELECT 1 FROM team_members m JOIN team_task_permissions p ON p.member_id=m.id AND p.team_id=m.team_id AND p.task_id=a.task_id AND p.permission='execute' WHERE m.id=a.member_id AND m.team_id=a.team_id AND m.revoked_at IS NULL) AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=a.task_id AND t.deleted_at IS NULL AND NOT t.paused AND (NOT t.queued OR t.queue_mode='remote_resume') AND t.status NOT IN ('paused','finalizing','done','failed','timeout')) AND (COALESCE(n.payload->'contract'->>'workflow_request_id','0')='0' OR EXISTS(SELECT 1 FROM workflow_requests wr WHERE wr.id=(n.payload->'contract'->>'workflow_request_id')::bigint AND wr.target_task_id=a.task_id AND wr.status='pending' AND wr.expires_at>now())) ORDER BY a.created_at LIMIT $3`, deviceID, teamHash(token), limit)
 	if e != nil {
 		return nil, e
 	}
@@ -580,6 +587,10 @@ func (d *DB) PollTeamExecutionAssignments(ctx context.Context, deviceID int64, t
 }
 
 func (d *DB) transitionTeamAssignment(ctx context.Context, id, deviceID int64, token string, epoch int64, next string, lease time.Duration, result json.RawMessage) (*TeamExecutionAssignment, error) {
+	return d.transitionTeamAssignmentMessages(ctx, id, deviceID, token, epoch, next, lease, result, nil, nil)
+}
+
+func (d *DB) transitionTeamAssignmentMessages(ctx context.Context, id, deviceID int64, token string, epoch int64, next string, lease time.Duration, result json.RawMessage, exchange *collab.MessageExchange, reply *collab.MessageExchangeReply) (*TeamExecutionAssignment, error) {
 	tx, e := d.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, e
@@ -613,7 +624,7 @@ func (d *DB) transitionTeamAssignment(ctx context.Context, id, deviceID int64, t
 		}
 	}
 	var expID int64
-	e = tx.QueryRowContext(ctx, `SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL AND NOT queued AND status NOT IN ('finalizing','done','failed','timeout') AND ((NOT paused AND status<>'paused') OR $2='completed') FOR UPDATE`, taskID, next).Scan(&expID)
+	e = tx.QueryRowContext(ctx, `SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL AND (NOT queued OR queue_mode='remote_resume') AND status NOT IN ('finalizing','done','failed','timeout') AND ((NOT paused AND status<>'paused') OR $2='completed') FOR UPDATE`, taskID, next).Scan(&expID)
 	if e != nil {
 		return nil, ErrTeamCollaborationDenied
 	}
@@ -714,6 +725,11 @@ func (d *DB) transitionTeamAssignment(ctx context.Context, id, deviceID int64, t
 	}
 	if next == "heartbeat" && a.State == "assigned" {
 		return nil, ErrTeamCollaborationConflict
+	}
+	if exchange != nil {
+		if e = exchangeTeamMessagesTx(ctx, tx, &a, expID, exchange, reply); e != nil {
+			return nil, e
+		}
 	}
 	if next == "completed" && a.State != "running" {
 		var checkpoint struct {

@@ -70,6 +70,9 @@ func (s *Server) occupiesConcurrencySlot(t *Task) bool {
 	if t == nil {
 		return false
 	}
+	if s.isBranchTaskForConcurrencySlot(t.ID) {
+		return false
+	}
 	lifecycle := t.lifecycleSnapshot()
 	if lifecycle.Queued || lifecycle.Paused || isTerminalStatus(lifecycle.Status) {
 		return false
@@ -116,6 +119,13 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
+	}
+	on, branchErr := s.branchTaskMode(t.ID)
+	if branchErr != nil {
+		return false, fmt.Errorf("无法确认任务执行模式，拒绝启动: %w", branchErr)
+	}
+	if on {
+		return false, fmt.Errorf("此任务采用执行分支模式，请在共享工作区认领或继续分支")
 	}
 	if t.Kind == "reverse" {
 		id, _ := strconv.ParseInt(t.ID, 10, 64)
@@ -178,6 +188,8 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	// queued rows have an empty queue_mode, so infer bootstrap from their graph.
 	if wasQueued {
 		switch lifecycle.QueueMode {
+		case db.RemoteWaitQueueMode:
+			mode = db.RemoteWaitQueueMode
 		case "bootstrap":
 			mode = "bootstrap"
 		case "":
@@ -188,11 +200,14 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	readyBacklog := enabled && s.hasReadyQueuedTask(t.ID)
 	atCapacity := enabled && s.runningTaskCount(t.ID) >= limit
 	shouldQueue := enabled && (!ready || readyBacklog || atCapacity)
+	if enabled && mode == db.RemoteWaitQueueMode && s.onlyWaitingForRemote(t) {
+		shouldQueue = true
+	}
 
 	// Install the execution barrier before reviving a terminal/paused task. Without
 	// this ordering, its already-running worker loops can claim the newly-opened
 	// intent in the gap between status=running and queued=true.
-	if shouldQueue || wasTerminal || wasPaused || wasQueued {
+	if (shouldQueue || wasTerminal || wasPaused || wasQueued) && lifecycle.QueueMode != db.RemoteWaitQueueMode {
 		s.engine.Pause(t.ID, agent.Causef("queued_for_admission", "任务等待运行准入",
 			"任务正在等待并发队列或准入状态提交，本次执行已停止；只有获得运行槽后才会重新领取意图"))
 	}
@@ -233,7 +248,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 	for _, task := range s.m.List() {
 		lifecycle := task.lifecycleSnapshot()
-		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !s.onlyWaitingForWorkflow(task) && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
+		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !s.onlyWaitingForWorkflow(task) && !s.onlyWaitingForRemote(task) && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
 			return true
 		}
 	}
@@ -270,6 +285,14 @@ func (s *Server) reconcileConcurrency() {
 	s.concMu.Lock()
 	defer s.concMu.Unlock()
 	enabled, limit := s.m.ConcurrencyLimit()
+	if enabled {
+		for _, task := range s.m.List() {
+			lifecycle := task.lifecycleSnapshot()
+			if !lifecycle.Paused && !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) && s.onlyWaitingForRemote(task) {
+				s.parkRemoteLocalEngine(task)
+			}
+		}
+	}
 	// Park waiters only after their current model/tool boundary. They re-enter
 	// through the normal FIFO admission when the result arrives, so waking a
 	// parent cannot exceed the running-task limit.
@@ -355,7 +378,7 @@ func (s *Server) reconcileConcurrency() {
 		// Keep FIFO order, but do not consume a concurrency slot for a task
 		// whose explicit chain/global provider is unavailable. It will be retried
 		// after the user configures or resets its LLM chain.
-		if lifecycle.Paused || s.onlyWaitingForWorkflow(task) || (enabled && !s.engine.ReadyFor(task)) {
+		if lifecycle.Paused || s.onlyWaitingForWorkflow(task) || (enabled && (s.onlyWaitingForRemote(task) || !s.engine.ReadyFor(task))) {
 			continue
 		}
 		mode := lifecycle.QueueMode

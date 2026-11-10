@@ -1156,7 +1156,7 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 		return err
 	}
 	if queued {
-		if mode != "bootstrap" && mode != "resume" {
+		if mode != "bootstrap" && mode != "resume" && mode != pgdb.RemoteWaitQueueMode {
 			return fmt.Errorf("invalid queue mode %q", mode)
 		}
 	} else {
@@ -1181,6 +1181,7 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	    queue_mode=CASE
 	        WHEN NOT $3 THEN ''
 	        WHEN ($5 AND queued AND queue_mode='bootstrap') OR $4='bootstrap' THEN 'bootstrap'
+	        WHEN $4='remote_resume' THEN 'remote_resume'
 	        ELSE 'resume'
 	    END,
 	    first_run_at=CASE

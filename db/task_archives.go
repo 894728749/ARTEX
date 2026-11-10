@@ -252,6 +252,12 @@ WHERE t.id=$1 AND t.deleted_at IS NULL FOR UPDATE OF t`, taskID).Scan(
 	if remoteRunning {
 		return nil, fmt.Errorf("协作设备仍在收尾，请等待当前工具回传后归档")
 	}
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM team_branch_projects p CROSS JOIN LATERAL jsonb_array_elements(COALESCE(p.state->'branches','[]')) b WHERE p.task_id=$1 AND (b->>'state' IN ('running','pausing','transfer_wait') OR EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(b->'operations','[]')) op WHERE op->>'state' IN ('started','uncertain'))))`, taskID).Scan(&remoteRunning); err != nil {
+		return nil, err
+	}
+	if remoteRunning {
+		return nil, fmt.Errorf("执行分支尚未确认停止，请先完成检查点或转交确认")
+	}
 	var workflowPending bool
 	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_requests WHERE (source_task_id=$1 OR target_task_id=$1) AND status='pending')`, taskID).Scan(&workflowPending); err != nil {
 		return nil, err
@@ -606,6 +612,9 @@ UNION ALL SELECT 'team_permission',p.team_id::text||':'||p.member_id::text||':'|
 UNION ALL SELECT 'team_assignment',a.id::text,jsonb_build_object('assignment_id',a.id,'team_id',a.team_id,'team_name',t.name,'task_id',a.task_id,'intent_id',a.intent_id,'member_id',a.member_id,'member_login',m.login,'member_revoked_at',m.revoked_at,'device_id',a.device_id,'device_name',d.name,'device_revoked_at',d.revoked_at,'epoch',a.epoch,'attempt',a.attempt,'resource_key',a.resource_key,'state',a.state,'lease_until',a.lease_until,'config_snapshot',a.config_snapshot,'input_snapshot',a.input_snapshot,'result',a.result,'review_member_id',a.review_member_id,'review_member_login',rm.login,'review_member_revoked_at',rm.revoked_at,'review_decision',a.review_decision,'review_note',a.review_note,'reviewed_at',a.reviewed_at,'created_at',a.created_at,'started_at',a.started_at,'finished_at',a.finished_at) FROM team_execution_assignments a JOIN teams t ON t.id=a.team_id JOIN team_members m ON m.id=a.member_id JOIN team_devices d ON d.id=a.device_id LEFT JOIN team_members rm ON rm.id=a.review_member_id WHERE a.task_id=$1
 UNION ALL SELECT 'team_resource',r.team_id::text||':'||r.resource_key,jsonb_build_object('team_id',r.team_id,'team_name',t.name,'resource_key',r.resource_key,'value',r.value,'owner_member_id',r.owner_member_id,'owner_login',m.login,'owner_revoked_at',m.revoked_at,'created_at',r.created_at,'updated_at',r.updated_at) FROM team_resources r JOIN teams t ON t.id=r.team_id LEFT JOIN team_members m ON m.id=r.owner_member_id WHERE r.task_id=$1
 UNION ALL SELECT 'team_dispatch',q.id::text,to_jsonb(q) FROM team_dispatch_queue q WHERE q.task_id=$1
+UNION ALL SELECT 'team_branch_project',p.task_id::text,p.state-'receipts' FROM team_branch_projects p WHERE p.task_id=$1
+UNION ALL SELECT 'team_branch_event',e.seq::text,e.event FROM team_branch_events e WHERE e.task_id=$1
+UNION ALL SELECT 'team_branch_workflow',w.id::text,to_jsonb(w) FROM team_branch_workflow_requests w WHERE w.task_id=$1
 ) SELECT * FROM live UNION ALL SELECT h.kind,h.source_key,h.snapshot FROM task_team_history h WHERE h.task_id=$1 AND NOT EXISTS(SELECT 1 FROM live l WHERE l.kind=h.kind AND l.source_key=h.source_key) ORDER BY kind,source_key`, []any{taskID}},
 		{"task_asset_links", `SELECT * FROM task_asset_links WHERE task_id=$1 ORDER BY asset_id`, []any{taskID}},
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},

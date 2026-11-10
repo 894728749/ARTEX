@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -35,7 +36,7 @@ func (s *ExplorationStore) claimIntent(ctx context.Context, id int64, owner stri
 		return nil, err
 	}
 	var gated bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE exploration_id=$1 AND (deleted_at IS NOT NULL OR paused OR queued OR status IN ('paused','finalizing','done','failed','timeout')))`, s.expID).Scan(&gated); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE exploration_id=$1 AND (deleted_at IS NOT NULL OR paused OR queued OR status IN ('paused','finalizing','done','failed','timeout') OR EXISTS(SELECT 1 FROM team_branch_projects bp WHERE bp.task_id=tasks.id)))`, s.expID).Scan(&gated); err != nil {
 		return nil, err
 	}
 	if gated {
@@ -45,19 +46,98 @@ func (s *ExplorationStore) claimIntent(ctx context.Context, id int64, owner stri
 		return nil, err
 	}
 	// Serializing on the exploration makes the resource check and admission one
-	// decision, including callers that bypass the in-process worker pool.
-	var picked int64
+	// decision, including callers that bypass the in-process worker pool. Lock
+	// the complete eligible frontier so a cross-task branch reservation cannot
+	// make the highest-priority row hide unrelated work behind it.
+	type intentCandidate struct {
+		id  int64
+		key string
+	}
+	candidates := []intentCandidate{}
 	conditions := claimableSQL
 	if paused {
 		conditions = strings.Replace(conditions, "n.state IN ('open','waiting')", "n.state='paused'", 1)
 	}
-	err = tx.QueryRowContext(ctx, `SELECT n.id FROM exploration_nodes n WHERE n.exploration_id=$1 AND ($2::bigint=0 OR n.id=$2) AND `+conditions+`
- ORDER BY n.priority + LEAST(10,FLOOR(EXTRACT(EPOCH FROM (now()-n.created_at))/600)) DESC,n.id LIMIT 1 FOR UPDATE OF n`, s.expID, id).Scan(&picked)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,COALESCE(n.payload->'contract'->>'resource_key','') FROM exploration_nodes n WHERE n.exploration_id=$1 AND ($2::bigint=0 OR n.id=$2) AND `+conditions+`
+	 ORDER BY n.priority + LEAST(10,FLOOR(EXTRACT(EPOCH FROM (now()-n.created_at))/600)) DESC,n.id FOR UPDATE OF n`, s.expID, id)
 	if err != nil {
 		return nil, err
+	}
+	for rows.Next() {
+		var candidate intentCandidate
+		if err = rows.Scan(&candidate.id, &candidate.key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	needsBranchLock := false
+	for _, candidate := range candidates {
+		if candidate.key != "" {
+			needsBranchLock = true
+			break
+		}
+	}
+	teams := []int64{}
+	if needsBranchLock {
+		rows, e := tx.QueryContext(ctx, `SELECT tt.team_id FROM team_tasks tt JOIN tasks t ON t.id=tt.task_id WHERE t.exploration_id=$1 ORDER BY tt.team_id`, s.expID)
+		if e != nil {
+			return nil, e
+		}
+		for rows.Next() {
+			var team int64
+			if e = rows.Scan(&team); e != nil {
+				rows.Close()
+				return nil, e
+			}
+			teams = append(teams, team)
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return nil, e
+		}
+		for _, team := range teams {
+			if err = lockBranchResources(ctx, tx, team); err != nil {
+				return nil, err
+			}
+		}
+	}
+	picked := int64(0)
+	for _, candidate := range candidates {
+		busy := false
+		if candidate.key != "" {
+			for _, team := range teams {
+				if err = branchResourceBusy(ctx, tx, team, 0, 0, []string{candidate.key}); err != nil {
+					if errors.Is(err, errBranchResourceBusy) {
+						busy = true
+						break
+					}
+					return nil, err
+				}
+			}
+		}
+		if busy {
+			// Explicit claims preserve their single-ID semantics; only frontier
+			// selection may continue past an unavailable resource key.
+			if id != 0 {
+				return nil, nil
+			}
+			continue
+		}
+		picked = candidate.id
+		break
+	}
+	if picked == 0 {
+		return nil, nil
 	}
 	n, err := scanNode(tx.QueryRowContext(ctx, `UPDATE exploration_nodes SET state='running',owner=$3 WHERE exploration_id=$1 AND id=$2 RETURNING `+nodeCols, s.expID, picked, owner))
 	if err != nil {

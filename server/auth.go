@@ -146,6 +146,9 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 		if !s.authorizeTeamPrincipal(w, r) {
 			return
 		}
+		if !s.guardBranchLegacyMutation(w, r) {
+			return
+		}
 		h.ServeHTTP(w, r)
 	})
 }

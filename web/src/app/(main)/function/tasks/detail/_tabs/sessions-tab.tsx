@@ -32,6 +32,7 @@ import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
+import { TeamSessionMessages } from "@/components/team-shared-messages";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,6 +70,7 @@ import type {
   TaskLLMResolution,
   TaskLLMResolutions,
   TaskNode,
+  TeamSession,
   TokenTotal,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -349,6 +351,7 @@ function SessionItem({
   onCancel,
   controlling,
   deleted,
+  executorBadge,
 }: {
   s: Session;
   active: boolean;
@@ -359,6 +362,7 @@ function SessionItem({
   onCancel?: () => void;
   controlling?: boolean;
   deleted?: boolean;
+  executorBadge?: string;
 }) {
   const icon = deleted ? (
     <Trash2Icon className="size-3.5 text-destructive" />
@@ -395,6 +399,11 @@ function SessionItem({
         {s.inherited && s.source_task_id && (
           <Badge variant="outline" className="shrink-0">
             来源 #{s.source_task_id}
+          </Badge>
+        )}
+        {executorBadge && (
+          <Badge variant="secondary" className="h-5 shrink-0 px-1.5 font-mono text-[10px] tabular-nums">
+            {executorBadge}
           </Badge>
         )}
         <span
@@ -544,6 +553,9 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
+  const [collaborationSessions, setCollaborationSessions] = React.useState<TeamSession[]>([]);
+  const [collaborationCanSteer, setCollaborationCanSteer] = React.useState(false);
+  const [collaborationLoaded, setCollaborationLoaded] = React.useState(false);
   const [taskLifecycle, setTaskLifecycle] = React.useState<{ status: string; paused: boolean }>({
     status: "",
     paused: false,
@@ -552,6 +564,39 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (MOCK || !taskId) {
+      setCollaborationSessions([]);
+      setCollaborationCanSteer(false);
+      setCollaborationLoaded(true);
+      return;
+    }
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      try {
+        const result = await api.taskCollaborationSessions(taskId);
+        if (!alive) return;
+        setCollaborationSessions(result.sessions);
+        setCollaborationCanSteer(result.canSteer);
+        setCollaborationLoaded(true);
+      } catch {
+        if (alive) {
+          setCollaborationSessions([]);
+          setCollaborationCanSteer(false);
+          setCollaborationLoaded(false);
+        }
+      } finally {
+        if (alive) timer = setTimeout(load, 5000);
+      }
+    };
+    setCollaborationSessions([]);
+    setCollaborationCanSteer(false);
+    setCollaborationLoaded(false);
+    void load();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [taskId]);
 
   async function pickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -1246,6 +1291,10 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   }, [intentAssets]);
 
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
+  const collaborationBySession = React.useMemo(
+    () => new Map(collaborationSessions.map((session) => [session.id, session])),
+    [collaborationSessions],
+  );
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;
 
   // For each worker session (intent), derive the display title from the intent
@@ -1358,6 +1407,10 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   };
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
+  const activeTeamSession = active.role === "worker"
+    ? collaborationBySession.get(`intent:${active.intent_id}`)
+    : undefined;
+  const activeIsRemote = !!activeTeamSession && activeTeamSession.executor_id > 0;
   const side = useSideQuestions(
     active.role === "mainagent"
       ? `/api/tasks/${taskId}/chat`
@@ -1629,6 +1682,11 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   function sendWorkerChat() {
     const intentId = active.intent_id;
     const message = workerMessage.trim();
+    // Remote workers use the team message protocol with its assignment/epoch fence.
+    // Never fall back to the local worker endpoint for a remote execution session.
+    if (!collaborationLoaded || (intentId && collaborationSessions.some((session) => session.id === `intent:${intentId}` && session.executor_id > 0))) {
+      return;
+    }
     if (side.handleCommand(message, () => setWorkerMessage(""))) return;
     if (
       !intentId ||
@@ -1858,6 +1916,11 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                           }}
                           controlling={controllingIntent === s.intent_id}
                           deleted={meta?.deleted}
+                          executorBadge={s.role === "worker" && collaborationBySession.has(`intent:${s.intent_id}`)
+                            ? collaborationBySession.get(`intent:${s.intent_id}`)!.executor_id === 0
+                              ? "本机"
+                              : `设备 #${collaborationBySession.get(`intent:${s.intent_id}`)!.executor_id}`
+                            : undefined}
                           onCancel={() => {
                             setCancelIntent(s);
                           }}
@@ -2034,7 +2097,14 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                     加载更早历史…
                   </div>
                 )}
-                {showLoader ? (
+                {activeIsRemote && activeTeamSession ? (
+                  <TeamSessionMessages
+                    team={String(activeTeamSession.team_id)}
+                    taskId={taskId}
+                    session={activeTeamSession}
+                    canSteer={collaborationCanSteer}
+                  />
+                ) : showLoader ? (
                   <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
                     <Loader2Icon className="size-3.5 animate-spin" />
                     加载活动流…
@@ -2067,7 +2137,11 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                 )}
               </div>
             </ScrollArea>
-            {isMain ? (
+            {activeIsRemote ? null : active.role === "worker" && !active.inherited && !collaborationLoaded ? (
+              <div className="border-t px-4 py-3 text-xs text-muted-foreground" role="status">
+                正在确认执行端身份，暂时不能发送消息。
+              </div>
+            ) : isMain ? (
               <div className="border-t p-3">
                 {attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">

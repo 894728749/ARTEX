@@ -99,6 +99,8 @@ import type {
   TaskGoal,
   TaskLLMResolutions,
   TaskNode,
+  TeamSession,
+  TeamSessionMessage,
   TaskScopeRow,
   TaskTemplate,
   TokenTotal,
@@ -833,6 +835,35 @@ export const api = {
     get<{ sessions: { seq: number; created_at: string }[]; current: number }>(
       `/exploration/main-sessions${tq(task)}`,
     ).then((r) => ({ sessions: arr(r.sessions), current: r.current ?? 0 })),
+  teamSessions: (team: string, task: string) =>
+    get<{ sessions: TeamSession[]; can_steer: boolean }>(
+      `/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(task)}/sessions`,
+    ).then((r) => ({ sessions: arr(r.sessions), canSteer: !!r.can_steer })),
+  taskCollaborationSessions: (task: string) =>
+    get<{ sessions: (TeamSession & { team_id: number })[]; can_steer: boolean }>(
+      `/tasks/${encodeURIComponent(task)}/collaboration/sessions`,
+    ).then((r) => ({ sessions: arr(r.sessions), canSteer: !!r.can_steer })),
+  teamSessionMessages: (team: string, task: string, session: string, before = 0, limit = 100) => {
+    const q = new URLSearchParams({ session, before: String(before), limit: String(limit) });
+    return get<{ items: TeamSessionMessage[]; has_more: boolean }>(
+      `/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(task)}/messages?${q.toString()}`,
+    ).then((r) => ({ items: arr(r.items), hasMore: !!r.has_more }));
+  },
+  teamSessionMessagesAfter: (team: string, task: string, session: string, after: number, limit = 100) => {
+    const q = new URLSearchParams({ session, after: String(after), limit: String(limit) });
+    return get<{ items: TeamSessionMessage[]; has_more: boolean }>(
+      `/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(task)}/messages?${q.toString()}`,
+    ).then((r) => ({ items: arr(r.items), hasMore: !!r.has_more }));
+  },
+  sendTeamSessionMessage: (
+    team: string,
+    task: string,
+    input: { intent_id: number; assignment_id: number; epoch: number; request_id: string; message: string },
+  ) =>
+    post<{ accepted: true; status: "pending" | "steering"; request_id: string }>(
+      `/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(task)}/messages`,
+      input,
+    ),
   // Start a fresh main-agent session segment (does not touch the task's graph/assets/goal).
   newMainSession: (task: string) =>
     post<{ seq: number; created_at: string; current: number }>(`/exploration/main-session/new${tq(task)}`),

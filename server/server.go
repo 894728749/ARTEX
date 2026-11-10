@@ -3728,6 +3728,15 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no active task")
 		return
 	}
+	on, branchErr := s.branchTaskMode(t.ID)
+	if branchErr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "无法确认任务执行模式，请稍后重试")
+		return
+	}
+	if on {
+		writeErr(w, 409, "此任务的对话和指导请通过团队执行分支工作台发送")
+		return
+	}
 	if s.engine.IsDeleting(t.ID) {
 		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
@@ -3751,6 +3760,17 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// turn busy before its first activity/file write, including rule-mode turns.
 	// If deletion wins the race, the second barrier check rejects this request.
 	s.chatMu.Lock()
+	on, branchErr = s.branchTaskMode(t.ID)
+	if branchErr != nil {
+		s.chatMu.Unlock()
+		writeErr(w, http.StatusServiceUnavailable, "无法确认任务执行模式，请稍后重试")
+		return
+	}
+	if on {
+		s.chatMu.Unlock()
+		writeErr(w, 409, "此任务已启用执行分支")
+		return
+	}
 	if s.engine.IsDeleting(t.ID) {
 		s.chatMu.Unlock()
 		writeErr(w, 409, "任务正在删除，无法发送新消息")

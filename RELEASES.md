@@ -2,6 +2,45 @@
 
 本文记录仓库里程碑标签对应的源码内容。`artex-*` 保留历史源码里程碑；带下载包的正式版本使用 `vX.Y.Z`，在线更新仅支持这类正式 Release。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 中实际完成上传的资产为准。前三个标签的说明依据标签注释及其对应提交；逆向验收范围另见 [`docs/逆向验收记录.md`](docs/逆向验收记录.md)。协作功能的配置和执行边界见 [协作说明](examples/README.md)，验证摘要列于下文。研发过程中的“v2”是内部迭代名称，首个公开协作标签为 `artex-collaboration-v1`。
 
+## `v0.5.0`
+
+发布日期：2026-11-10。此版本在 `v0.4.1` 之后增加共享主任务的执行分支协作，并收录此前已合入 `main` 的升级标记故障保护（`d59491a`）。历史标签保持不变。
+
+### 新增与修复
+
+- 主任务可显式启用分支模式；成员认领自己的设备后创建独立 Planner、预算、工作单与历史。工作池按权限与设备能力分配，协调 Planner 也须认领设备并计账。
+- 团队消息区分讨论和明确指导；指导具有 queued、received、applied/failed 状态，并绑定工作单与执行代次。页面展示执行端编号；消息按序增量补取、去重，权限撤销和封口仍受服务端检查。
+- 支持渗透与逆向流程间的受额度约束协助、来源证据版本引用及变更失效传播；技术核验后要求未参与执行的另一名授权成员独立复核。归档恢复仅恢复审计，不恢复租约或执行授权。
+- 远端独立执行或待复核且无本机可运行工作时可释放本机并发名额；本机新工作重新按 FIFO 申请名额。队首资源被占用时可选择后续可运行工作，指定工作 ID 仍不能绕过资源占用。
+- 增强故障恢复、权限复核与幂等处理：未知操作保持资源占用；恢复补传结果而不重放外部副作用；重试/转交不重置已用预算；永久拒绝不会无限重放。证据变化使下游引用和验收失效。
+- 修复自更新暂存阶段标记写入失败的处理：清理暂存文件并返回错误，清理失败也报告；缺失或不可读的升级标记会拒绝换装。相关回归见 `selfupdate/marker_failure_test.go`。
+
+### 验证结果
+
+本轮使用独立 PostgreSQL、真实 Node 子进程、本地 TLS API、假模型、合成材料及隔离浏览器预览；未连接真实模型或外部目标。代表性命令及实际结果：
+
+```bash
+go test -race ./db ./collab -count=1 -timeout 8m
+go test -race ./db -run '^TestBranchAdmission' -count=1 -v -timeout 2m
+go test -race ./server -count=1 -timeout 8m
+go test -race ./cmd/artex-node -count=1
+go test -race ./server -run '^(TestBranchRealNode|TestTeamRealNode)' -count=1 -v -timeout 3m
+go test -count=1 ./selfupdate
+go build ./...
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/artex-node
+NEXT_EXPORT=1 npm run build -- --webpack
+```
+
+数据库测试须设置指向独立测试库的 `ARTEX_PG_DSN`；真实节点测试还须用 `ARTEX_NODE_ACCEPTANCE_BINARY` 指定已构建的节点程序。前端命令在 `web` 目录执行。
+
+以上数据库、服务端、节点、更新器及真实节点进程回归均通过；Linux 全包构建、Windows 节点交叉编译、前端静态导出与 TypeScript 检查通过。浏览器合成数据验收确认历史消息检索、讨论/指导保存、queued 状态、执行端编号及只读成员入口限制。测试还覆盖并发认领、离线待就绪、撤权、旧代次拒绝、预算、跨主任务资源互斥、协助取消、证据失效、独立复核、归档恢复与队列准入。
+
+### 兼容性与边界
+
+- 分支模式和节点 `execution.branches.enabled` 默认关闭；旧任务调度及单工作单交接保留。新消息交付需 Node 声明 `message_protocol: 1`；旧节点继续原有工作单，消息通道不开放。升级顺序为先 Hub、后 Node；含 `remote_resume` 的活跃任务完成或暂停前，不应回退到不识别该队列模式的旧 Hub。
+- 本轮未在第二台物理设备、NAT 或公网 Relay 网络上实测；浏览器使用合成数据。Windows 结果仅为节点交叉编译，不是 Windows 进程实跑。自更新标记故障保护的新增回归见源码测试文件；本段没有声称全平台升级运行通过。
+- 五平台包与双架构容器由 tag 发布流水线构建，产物可用性以对应 GitHub Actions 和 Release 记录为准。工具范围字段校验不等同于操作系统沙箱；额度按模型/工具/规划动作计数，不是 Token 或金额，工具内部 HTTP 请求频率仍由本机适配器或代理负责。
+
 ## `v0.4.1`
 
 发布日期：2026-11-09。修复旧内置提示词未随程序更新、升级覆盖自定义内容或错误标记完成、并发保存版本冲突，以及资产覆盖率误计。原有 `v0.4.0` 和历史源码里程碑标签保持不变。

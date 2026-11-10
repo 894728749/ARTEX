@@ -242,7 +242,7 @@ func (s *Server) dispatchTeamOnce(ctx context.Context) {
 }
 
 func (s *Server) teamHistory(w http.ResponseWriter, r *http.Request) {
-	_, _, t, ok := s.teamTaskScope(w, r, "read")
+	p, _, t, ok := s.teamTaskScope(w, r, "read")
 	if !ok {
 		return
 	}
@@ -250,6 +250,15 @@ func (s *Server) teamHistory(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		writeErr(w, 500, "无法读取协作历史")
 		return
+	}
+	if !p.Admin {
+		filtered := make([]db.TaskTeamHistory, 0, len(rows))
+		for _, row := range rows {
+			if row.Kind != "team_branch_project" && row.Kind != "team_branch_event" && row.Kind != "team_branch_workflow" {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
 	}
 	writeJSON(w, 200, rows)
 }

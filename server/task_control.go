@@ -98,6 +98,13 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		return taskControlResult{}, fmt.Errorf("task not found")
 	}
 	out := taskControlResult{ID: t.ID}
+	on, branchErr := s.branchTaskMode(t.ID)
+	if branchErr != nil {
+		return out, fmt.Errorf("无法确认任务执行模式，拒绝控制: %w", branchErr)
+	}
+	if on {
+		return out, fmt.Errorf("此任务已启用共享分支，请在团队工作台控制主任务")
+	}
 	switch action {
 	case "pause", "pause_after_tool":
 		s.concMu.Lock()

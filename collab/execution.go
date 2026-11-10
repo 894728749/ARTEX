@@ -13,15 +13,16 @@ import (
 // ExecutionConfig is a portable, immutable role snapshot. Credentials, executable
 // paths and database handles are resolved only by the receiving device.
 type ExecutionConfig struct {
-	Version        int             `json:"version"`
-	Kind           string          `json:"kind"`
-	Role           string          `json:"role"`
-	SystemPrompt   string          `json:"system_prompt"`
-	Capabilities   []string        `json:"capabilities"`
-	MaxTurns       int             `json:"max_turns"`
-	BudgetSeconds  int             `json:"budget_seconds"`
-	DynamicAllowed bool            `json:"dynamic_allowed"`
-	Runtime        *RuntimeBinding `json:"runtime,omitempty"`
+	Version         int             `json:"version"`
+	MessageProtocol int             `json:"message_protocol,omitempty"`
+	Kind            string          `json:"kind"`
+	Role            string          `json:"role"`
+	SystemPrompt    string          `json:"system_prompt"`
+	Capabilities    []string        `json:"capabilities"`
+	MaxTurns        int             `json:"max_turns"`
+	BudgetSeconds   int             `json:"budget_seconds"`
+	DynamicAllowed  bool            `json:"dynamic_allowed"`
+	Runtime         *RuntimeBinding `json:"runtime,omitempty"`
 }
 
 // RuntimeProfile describes a device-owned environment without exposing local
@@ -104,7 +105,7 @@ func ContentHash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToSt
 
 func (c ExecutionConfig) Validate() error {
 	validRole := c.Kind == "pentest" && c.Role == "worker" || c.Kind == "reverse" && (c.Role == "reverse_static" || c.Role == "reverse_dynamic" || c.Role == "reverse_reviewer")
-	if c.Version != 1 || !validRole || len(c.SystemPrompt) > 128<<10 || c.MaxTurns < 1 || c.MaxTurns > 64 || c.BudgetSeconds < 10 || c.BudgetSeconds > 7200 || len(c.Capabilities) > 32 {
+	if c.Version != 1 || (c.MessageProtocol != 0 && c.MessageProtocol != 1) || !validRole || len(c.SystemPrompt) > 128<<10 || c.MaxTurns < 1 || c.MaxTurns > 64 || c.BudgetSeconds < 10 || c.BudgetSeconds > 7200 || len(c.Capabilities) > 32 {
 		return errors.New("invalid portable execution configuration")
 	}
 	if c.Role == "reverse_dynamic" && !c.DynamicAllowed {

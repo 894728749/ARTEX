@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { http } from "@/lib/api";
+import { TeamSessionWorkspace } from "@/components/team-shared-messages";
+import { TeamBranches } from "@/components/team-branches";
 
 type Intent = {
   id: number;
@@ -211,6 +213,7 @@ export function ExecutionPanel({
   admin: boolean;
 }) {
   const [taskID, setTaskID] = React.useState("");
+  const [branchMode, setBranchMode] = React.useState(false);
   const [work, setWork] = React.useState<Work | null>(null);
   const [assignments, setAssignments] = React.useState<Assignment[]>([]);
   const [intentID, setIntentID] = React.useState("");
@@ -238,6 +241,7 @@ export function ExecutionPanel({
   const previousTaskID = React.useRef(taskID);
   React.useEffect(() => {
     activeTaskScope.current = historyScope;
+    setBranchMode(false);
   }, [historyScope]);
   React.useEffect(() => {
     if (previousTeam.current === team) return;
@@ -285,8 +289,19 @@ export function ExecutionPanel({
           http<Assignment[]>(`/teams/${team}/assignments?task_id=${taskID}`),
         ]);
         if (alive) {
-          setWork(w);
-          setAssignments(a);
+          const normalized: Work = {
+            ...w,
+            intents: w?.intents ?? [],
+            materials: w?.materials ?? [],
+            devices: (w?.devices ?? []).map((device) => ({
+              ...device,
+              capabilities: device.capabilities ?? {},
+            })),
+            dispatch_queue: w?.dispatch_queue ?? [],
+            permissions: w?.permissions ?? { manage: false, review: false },
+          };
+          setWork(normalized);
+          setAssignments(a ?? []);
           setUpdated(new Date().toLocaleTimeString());
           setError("");
         }
@@ -488,6 +503,8 @@ export function ExecutionPanel({
             ))}
           </select>
         </div>
+        {taskID && !branchMode && <TeamSessionWorkspace team={team} taskId={taskID} />}
+        {taskID && <TeamBranches key={historyScope} team={team} taskId={Number(taskID)} memberID={memberID} admin={admin} members={members} devices={work?.devices} materials={work?.materials} canManage={admin || !!work?.permissions.manage} onModeChange={setBranchMode} />}
         {error && (
           <p role="alert" className="rounded-md border border-destructive/40 p-3 text-destructive text-sm">
             {error}
@@ -503,7 +520,7 @@ export function ExecutionPanel({
             正在读取工作单…
           </p>
         )}
-        {work && (
+        {work && !branchMode && (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
               <span className="text-muted-foreground">每 5 秒同步 · 最近成功同步 {updated}</span>

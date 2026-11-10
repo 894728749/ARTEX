@@ -1,0 +1,32 @@
+{
+  "coordinator_url": "https://artex-team.example.invalid:8787",
+  "ca_file": "/srv/artex-node/coordinator-ca.pem",
+  "server_name": "artex-team.example.invalid",
+  "lan_addresses": ["192.0.2.10:8787"],
+  "execution": {
+    "branches": {
+      "enabled": true,
+      "material_mode": "assigned",
+      "scope_fields": {},
+      "env_secret_names": [],
+      "redact_strings": []
+    },
+    "work_dir": "/srv/artex-node/private-work",
+    "outbox_dir": "/srv/artex-node/private-outbox",
+    "models": {
+      "pentest-model": {"endpoint": "https://model.example.invalid/v1", "api_key_env": "ARTEX_PENTEST_KEY", "model": "replace-with-local-choice", "format": "openai"},
+      "reverse-model": {"endpoint": "https://model.example.invalid/v1", "api_key_env": "ARTEX_REVERSE_KEY", "model": "replace-with-local-choice", "format": "openai"}
+    },
+    "roles": {
+      "planner": {"model": "pentest-model", "capabilities": []},
+      "worker": {"model": "pentest-model", "capabilities": []},
+      "reviewer": {"model": "pentest-model", "capabilities": []},
+      "reverse_planner": {"model": "reverse-model", "capabilities": []},
+      "reverse_static": {"model": "reverse-model", "capabilities": []},
+      "reverse_reviewer": {"model": "reverse-model", "capabilities": []}
+    },
+    "commands": {},
+    "mcp_servers": {},
+    "mcp_tools": {}
+  }
+}

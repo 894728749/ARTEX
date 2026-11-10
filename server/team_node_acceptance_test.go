@@ -70,7 +70,7 @@ func TestTeamRealNodeProcessAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deviceCaps, _ := json.Marshal(map[string]any{"version": 1, "execution_enabled": true, "roles": []string{"reverse_static"}, "capabilities": []string{}})
+	deviceCaps, _ := json.Marshal(map[string]any{"version": 1, "message_protocol": 1, "execution_enabled": true, "roles": []string{"reverse_static"}, "capabilities": []string{}})
 	device, deviceToken, err := pg.PairTeamDevice(ctx, pair, "node acceptance device", deviceCaps)
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +218,9 @@ func TestTeamRealNodeProcessAcceptance(t *testing.T) {
 	if assignment.DeviceID != device.ID {
 		t.Fatalf("wrong-role device selected: %d", assignment.DeviceID)
 	}
+	if assignment.Config.MessageProtocol != 1 {
+		t.Fatal("message-capable node did not receive the message protocol")
+	}
 	if err = assignment.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +271,17 @@ func TestTeamRealNodeProcessAcceptance(t *testing.T) {
 	}
 	if saved.State != "completed" {
 		t.Fatalf("node result state=%q, want completed", saved.State)
+	}
+	var ready, closed bool
+	if err = pg.QueryRow(`SELECT messages_ready,messages_closed FROM team_execution_assignments WHERE id=$1`, assignment.ID).Scan(&ready, &closed); err != nil || !ready || !closed {
+		t.Fatalf("real node message channel ready=%t closed=%t: %v", ready, closed, err)
+	}
+	shared := request(http.MethodGet, fmt.Sprintf("%s/messages?session=intent:%d", prefix, intentID), admin, nil, http.StatusOK)
+	var messagePage struct {
+		Items []db.TeamMessage `json:"items"`
+	}
+	if err = json.Unmarshal(shared, &messagePage); err != nil || len(messagePage.Items) != 1 || messagePage.Items[0].Text != "Candidate: supplied fixture was read; independent review required." || messagePage.Items[0].ExecutorID != device.ID {
+		t.Fatalf("real node final message missing, duplicated or incorrectly attributed: %s (%v)", shared, err)
 	}
 	var result collab.ExecutionResult
 	if err = json.Unmarshal(saved.Result, &result); err != nil {
