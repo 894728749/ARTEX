@@ -13,17 +13,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/collab"
 )
+
+var version = "dev"
 
 type nodeConfig struct {
 	CoordinatorURL string                `json:"coordinator_url"`
@@ -67,7 +71,7 @@ func clientFor(c nodeConfig) (*http.Client, *collab.HybridDialer, error) {
 	if len(addresses) == 0 {
 		address := u.Host
 		if u.Port() == "" {
-			address = u.Hostname() + ":443"
+			address = net.JoinHostPort(u.Hostname(), "443")
 		}
 		addresses = []string{address}
 	}
@@ -191,11 +195,16 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	configPath := flags.String("config", "node.json", "coordinator connection configuration")
 	statePath := flags.String("state", "node-state/identity.json", "private device identity file")
 	name := flags.String("name", "", "device display name")
+	showVersion := flags.Bool("version", false, "print node build and protocol versions")
 	if err := flags.Parse(args); err != nil {
-		return errors.New("usage: artex-node -config node.json -state node-state/identity.json [-name device] pair|status")
+		return errors.New("usage: artex-node [-version] -config node.json -state node-state/identity.json [-name device] check|pair|status|run|run-once")
+	}
+	if *showVersion {
+		fmt.Fprintf(out, "artex-node %s (device protocol 1, branch protocol 1)\n", version)
+		return nil
 	}
 	if flags.NArg() != 1 {
-		return errors.New("choose pair, status, run, or run-once")
+		return errors.New("choose check, pair, status, run, or run-once")
 	}
 	data, err := os.ReadFile(*configPath)
 	if err != nil {
@@ -211,6 +220,57 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	}
 	defer dialer.CloseIdleConnections()
 	switch flags.Arg(0) {
+	case "check":
+		// Inspection only: never pair, claim work, start tools or call a model.
+		if config.Execution != nil {
+			if err = config.Execution.validate(); err != nil {
+				return err
+			}
+			if (config.Execution.WorkDir != "" && !filepath.IsAbs(config.Execution.WorkDir)) || (config.Execution.OutboxDir != "" && !filepath.IsAbs(config.Execution.OutboxDir)) {
+				return errors.New("execution work_dir and outbox_dir must be absolute")
+			}
+			roles := []string{}
+			for role, binding := range config.Execution.Roles {
+				model := config.Execution.Models[binding.Model]
+				if os.Getenv(model.APIKeyEnv) == "" {
+					return fmt.Errorf("role %s: model credential environment variable is missing", role)
+				}
+				if config.Execution.Branches.Enabled && role != "planner" && role != "reverse_planner" {
+					planner := "planner"
+					if strings.HasPrefix(role, "reverse_") {
+						planner = "reverse_planner"
+					}
+					if _, ok := config.Execution.Roles[planner]; !ok {
+						return fmt.Errorf("role %s needs a local %s binding", role, planner)
+					}
+					for _, capability := range binding.Capabilities {
+						if capability != "read_material" && capability != "reverse_observe_runtime" && len(config.Execution.Branches.ScopeFields[capability]) == 0 {
+							return fmt.Errorf("capability %s needs branches.scope_fields", capability)
+						}
+					}
+				}
+				roles = append(roles, role)
+			}
+			sort.Strings(roles)
+			fmt.Fprintf(out, "Local roles validated: %s; branch protocol enabled: %t. Models and tools were not invoked.\n", strings.Join(roles, ", "), config.Execution.Branches.Enabled)
+		} else {
+			fmt.Fprintln(out, "Connection-only configuration; execution is not enabled.")
+		}
+		var health struct {
+			OK      bool   `json:"ok"`
+			Service string `json:"service"`
+			Version string `json:"version"`
+		}
+		if err = request(ctx, client, config.CoordinatorURL, "/api/health", "", nil, &health); err != nil {
+			return err
+		}
+		if !health.OK || health.Service != "artex" || health.Version == "" {
+			return errors.New("endpoint did not return a valid ARTEX health response")
+		}
+		fmt.Fprintf(out, "TLS verified; route: %s; coordinator: %s; node: %s. No identity or work was changed.\n", dialer.TransportStatus().Route, health.Version, version)
+		if version != "dev" && version != health.Version {
+			fmt.Fprintln(out, "Version mismatch: use a node built from the same release as the coordinator before enabling execution.")
+		}
 	case "pair":
 		if _, err := os.Lstat(*statePath); !os.IsNotExist(err) {
 			return errors.New("device state already exists or is unreadable")
@@ -276,7 +336,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		}
 		return runAssignments(ctx, *config.Execution, *statePath, config.CoordinatorURL, client, out, flags.Arg(0) == "run-once")
 	default:
-		return errors.New("choose pair or status")
+		return errors.New("choose check, pair, status, run, or run-once")
 	}
 	return nil
 }

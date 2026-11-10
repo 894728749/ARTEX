@@ -155,7 +155,7 @@ func run() int {
 	}
 	var teamSrv *http.Server
 	if *teamAddr != "" {
-		teamSrv = &http.Server{Addr: *teamAddr, Handler: srv.Handler(), TLSConfig: httpSrv.TLSConfig, ReadHeaderTimeout: 10 * time.Second}
+		teamSrv = &http.Server{Addr: *teamAddr, Handler: srv.TeamHandler(), TLSConfig: httpSrv.TLSConfig, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := teamSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				log.Print("team listener stopped")
@@ -170,7 +170,7 @@ func run() int {
 			return 1
 		}
 		go func() {
-			if err := collab.ServeRelayHTTP(ctx, collab.RelayConfig{URL: *relayURL, Room: *relayRoom, Peer: *relayPeer, Secret: secret}, httpSrv.TLSConfig, srv.Handler()); err != nil && ctx.Err() == nil {
+			if err := collab.ServeRelayHTTP(ctx, collab.RelayConfig{URL: *relayURL, Room: *relayRoom, Peer: *relayPeer, Secret: secret}, httpSrv.TLSConfig, srv.TeamHandler()); err != nil && ctx.Err() == nil {
 				log.Print("relay listener stopped")
 				shutdown(agent.AbortShutdown)
 			}

@@ -1,8 +1,45 @@
 # 发布说明
 
-本文覆盖本仓库全部 8 个版本标签，按版本演进倒序记录新增功能、修复、验证结果和兼容边界。当前正式版为 **v0.5.0**；`artex-*` 是历史源码里程碑，未发布独立二进制下载包，不参与在线更新。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 的实际资产为准。
+本文记录本仓库版本标签及未发布的 `main` 更新，按版本演进倒序记录新增功能、修复、验证结果和兼容边界。当前正式版仍为 **v0.5.0**；下方 `main` 条目没有升级正式 tag 或 Release。`artex-*` 是历史源码里程碑，未发布独立二进制下载包，不参与在线更新。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 的实际资产为准。
 
 日期和时间均按北京时间（UTC+8）记录，区分源码快照、标签建立和 Release 发布时点。本文于 2026-11-10 补齐历史说明，保留原标签指向；下面的测试结果属于各版原验收记录，不表示本次重新运行了历史测试。上游 0.3.15 及更早的继承记录保留在 [CHANGELOG.md](CHANGELOG.md)，不代表本仓库另有对应正式 Release。研发过程中的“v2”是内部迭代名称，首个公开协作标签为 `artex-collaboration-v1`。
+
+## `main`（未发布，2026-11-10）
+
+本轮为 `main` 上的协作可用性修复，不创建新 tag 或 Release。当前正式版仍是 `v0.5.0`。
+
+### 修复与改进
+
+- 同名团队显示编号；管理员可删除没有成员、设备、共享任务或协作历史的空团队，服务端以事务锁避免检查与删除之间的插入竞态，有历史的团队保留。
+- 增加四项任务基础权限的精确保存与九项分支权限的独立授予/撤销。分支权限仍受任务基础查看和执行权限约束；撤销访问、过程或证据权限时清除已打开成员页的本地缓存。
+- 发布工作单时可明确指定协调器工作并显示其标识。自动发布只创建可领取工作项；仍需成员认领、Node 就绪及管理者恢复主项目。
+- 修复渗透任务启用分支时误读逆向材料库的问题；显式跨流程材料仍会被拒绝。独立成员 TLS 入口和 Relay 改用受限 Handler，保留成员登录、团队和设备操作，拒绝管理员登录、初始化、设置及普通任务 API。
+- Node 增加只读 `check` 与 `-version`，可核对 TLS、协调器/Node 版本及本地角色和范围配置，不配对、不领取工作，也不调用模型或工具。Linux/Windows amd64 安装包包含同版本 Node、无凭据配置示例和接入指南。
+- 打包使用仓库内受跟踪的指南与示例，移除对未跟踪本地旧文档的依赖，避免干净检出后因缺文件而失败。
+- 管理 API 测试改用测试上下文并清理 Manager，避免遗留后台派发器干扰队列轮转测试；未降低队列尾项不饥饿断言。
+
+### 验证结果
+
+- 前端静态构建与 TypeScript 检查通过。DB、协作协议、Node、自更新 race 回归通过；分支启用专项回归通过。全量 `server` race 测试有 265 个顶层测试通过、5 个条件跳过、0 失败且无 race 报告。
+- 独立 TLS 成员入口上的真实 Node 子进程闭环通过：3 次规划、2 次执行和 1 次复核模型请求使用合成模型及自有材料。
+- Linux 与 Windows amd64 安装包构建、ZIP 内容/CRC/SHA-256/Node/文档一致性核对通过；两平台 Node `-version` 输出均为 `0.5.0-usability`，device/branch protocol 为 1。测试期间运行的包是未发布验收构建。
+- 合成浏览器夹具覆盖团队编号和删除保护、基础与分支权限、撤权清缓存、协调器工作、渗透分支启用及成员入口。Node TLS 测试另行验证执行链；浏览器夹具本身不运行真实工作。
+
+代表性验证命令（数据库须指向隔离测试库，真实节点用 `ARTEX_NODE_ACCEPTANCE_BINARY` 指定预先构建的 Node；前端命令在 `web` 目录执行）：
+
+```bash
+NEXT_EXPORT=1 NEXT_TELEMETRY_DISABLED=1 npm run build:static
+go test -race ./db ./collab ./cmd/artex-node ./selfupdate -count=1 -timeout=8m
+go test -race ./server -count=1 -v -timeout=8m
+go test -race ./server -run TestBranchRealNodeContinuousPlanningAndIndependentReview -count=1 -v -timeout=4m
+```
+
+### 兼容性与边界
+
+- 没有第二台实体设备；跨物理设备网络、防火墙、证书导入与 WSL 转发未验收。真实模型及 MCP 部署未验证，不能把合成模型链路表述为真实模型任务通过。
+- 正式 `v0.5.0` tag、Release 与既有版本记录不改写；`main` 构建不替代在线更新的正式发布源。
+- 全量 server 测试有五项条件跳过：`TestLiveContextReview`、`TestReverseRealEngineAcceptance`、`TestReverseHermesV94MaterialAcceptance`、`TestBranchBrowserPreview`、`TestTeamOnboardingBrowserPreview`。团队浏览器预览另行启动并通过；真实外部逆向引擎未在本轮重跑。
+- 独立 TLS/Relay 入口不再提供管理员操作；管理员须使用原管理入口。任务基础与分支权限仍独立，不默认扩大授权；本次没有新增数据库迁移。
 
 ## `v0.5.0`
 

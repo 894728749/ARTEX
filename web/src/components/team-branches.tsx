@@ -83,6 +83,7 @@ type PoolWork = {
     question: string;
     kind: string;
     budget: number;
+    coordinator?: boolean;
     restricted: boolean;
     members?: number[];
     asset_ids: string[];
@@ -113,6 +114,7 @@ type Snapshot = {
     state: string;
     pool: PoolWork[];
     branches: Branch[];
+    permissions?: Record<string, string[]>;
   };
   permissions: string[];
   events: BranchEvent[];
@@ -158,6 +160,18 @@ const commandPath = (team: string, taskId: number) => `/teams/${team}/tasks/${ta
 const branchPath = (team: string, taskId: number) => `/teams/${team}/tasks/${taskId}/branches`;
 const controlClass = "min-h-10 w-full rounded-md border bg-background px-3 py-2 text-sm";
 const newRequestID = () => `branch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+const branchPermissionKeys = ["read", "process", "evidence", "discuss", "execute", "guide", "control", "review", "manage"] as const;
+
+function isPermissionDenied(error: unknown) {
+  const value = error as (Error & { status?: number }) | null;
+  const message = value?.message?.toLowerCase() ?? "";
+  return value?.status === 401 || value?.status === 403 || message === "未授权" || message.includes("branch access denied") || message.includes("team collaboration authorization denied") || message.includes("没有此任务操作权限");
+}
+
+function isNotFound(error: unknown) {
+  const value = error as (Error & { status?: number }) | null;
+  return value?.status === 404 || (value?.message ?? "").includes("404");
+}
 
 function parseAssets(text: string): BranchAsset[] {
   return text
@@ -181,10 +195,16 @@ function parseCapabilities(text: string): string[] {
 
 function mergeSnapshots(current: Snapshot | null, incoming: Snapshot, append: boolean): Snapshot {
   const safe = normalizeSnapshot(incoming);
+  const previousPermissions = new Set(current?.permissions ?? []);
+  const nextPermissions = new Set(safe.permissions);
+  const lostProcess = !!current && previousPermissions.has("process") && !nextPermissions.has("process");
+  const lostEvidence = !!current && previousPermissions.has("evidence") && !nextPermissions.has("evidence");
   const older = append && current ? normalizeSnapshot(current).events : [];
   const byID = new Map<number, BranchEvent>();
   for (const event of [...older, ...safe.events]) byID.set(event.id, event);
-  return { ...safe, events: [...byID.values()].sort((a, b) => a.id - b.id) };
+  const events = lostProcess ? [] : [...byID.values()].sort((a, b) => a.id - b.id);
+  if (lostEvidence) for (const event of events) delete event.evidence;
+  return { ...safe, events };
 }
 
 function normalizeSnapshot(value: Snapshot): Snapshot {
@@ -199,6 +219,7 @@ function normalizeSnapshot(value: Snapshot): Snapshot {
     permissions: value?.permissions ?? [], events: value?.events ?? [],
     project: {
       ...project,
+      permissions: project?.permissions ?? {},
       policy: { ...project.policy, materials: project.policy?.materials ?? [], assets: project.policy?.assets ?? [], kinds: project.policy?.kinds ?? [] },
       pool: project.pool ?? [], branches,
     },
@@ -343,7 +364,16 @@ export function TeamBranches({
       } catch (error) {
         if (!active || scopeRef.current !== requestedScope || requestedMutation !== mutationVersion.current) return;
         const message = (error as Error).message;
-        if (!snapshotRef.current && message.includes("404")) {
+        if (isPermissionDenied(error)) {
+          mutationVersion.current++;
+          snapshotRef.current = null;
+          setSnapshot(null);
+          setAppliedSearch("");
+          setSearchText("");
+          setPollError("你已无权查看此分支或任务协作内容，已清除本地缓存；系统将重新检查可见范围。");
+          return;
+        }
+        if (!snapshotRef.current && isNotFound(error)) {
           setEnabled(false);
           setPollError("");
         } else {
@@ -372,7 +402,9 @@ export function TeamBranches({
   const memberName = (id: number) => membersByID.get(id)?.login ?? `成员 ${id}`;
   const deviceName = (id: number) => ownDevices.find((d) => d.id === id)?.name ?? `设备 ${id}`;
   const permissions = new Set(snapshot?.permissions ?? []);
-  const manage = admin || permissions.has("manage") || canManage;
+  const branchManage = admin || permissions.has("manage");
+  const manage = branchManage;
+  const canEnable = branchManage || canManage;
   const visibleBranches = (data?.branches ?? []).filter((branch) => branchFilter === "all" || admin || branch.owner_id === memberID || branch.contributors.includes(memberID));
   const activeBranch = visibleBranches.find((branch) => branch.id === selectedBranch) ?? visibleBranches[0];
   const usableMembers = members.filter((m) => !m.revoked);
@@ -406,7 +438,16 @@ export function TeamBranches({
       setPollError("");
       setUpdated(new Date().toLocaleTimeString());
     } catch (error) {
-      if (scopeRef.current === requested) setPollError(`同步失败，保留上次状态：${(error as Error).message}`);
+      if (scopeRef.current === requested) {
+        if (isPermissionDenied(error)) {
+          mutationVersion.current++;
+          snapshotRef.current = null;
+          setSnapshot(null);
+          setAppliedSearch("");
+          setSearchText("");
+          setPollError("你已无权查看此分支或任务协作内容，已清除本地缓存。");
+        } else setPollError(`同步失败，保留上次状态：${(error as Error).message}`);
+      }
     } finally {
       if (scopeRef.current === requested) setLoading(false);
     }
@@ -433,11 +474,12 @@ export function TeamBranches({
       if (response.snapshot) {
         // Command snapshots have no search filter and only one event page.
         // Refresh the visible query separately; never advance its cursor here.
-        const merged = mergeSnapshots(snapshotRef.current, {
+        const replaceProjection = type === "grant";
+        const merged = mergeSnapshots(replaceProjection ? null : snapshotRef.current, {
           ...response.snapshot, events: [],
           cursor: snapshotRef.current?.cursor ?? 0,
           has_more: snapshotRef.current?.has_more ?? false,
-        }, true);
+        }, !replaceProjection);
         snapshotRef.current = merged;
         setSnapshot(merged);
       }
@@ -447,7 +489,16 @@ export function TeamBranches({
       setPollKey((value) => value + 1);
       return true;
     } catch (error) {
-      if (scopeRef.current === requestedScope) setActionError((error as Error).message);
+      if (scopeRef.current === requestedScope) {
+        if (isPermissionDenied(error)) {
+          mutationVersion.current = version + 1;
+          snapshotRef.current = null;
+          setSnapshot(null);
+          setAppliedSearch("");
+          setSearchText("");
+          setActionError("权限已变化，此操作未获准；本地分支缓存已清除，请刷新后查看当前可用内容。");
+        } else setActionError((error as Error).message);
+      }
       return false;
     } finally {
       if (scopeRef.current === requestedScope) {
@@ -578,7 +629,7 @@ export function TeamBranches({
         {enabled === false && (
           <div className="space-y-3 rounded-md border p-4">
             <p className="text-sm text-muted-foreground">此共享任务尚未启用执行分支协作。启用需要管理员或任务管理权限，启用不会复制任务，也不会自动启动执行。</p>
-            {manage ? (
+            {canEnable ? (
               <>
                 <Button type="button" variant="outline" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
                   {expanded ? "收起设置" : "设置并启用分支协作"}
@@ -593,7 +644,7 @@ export function TeamBranches({
                       <div className="space-y-2">
                         <Label htmlFor={`branch-assets-${taskId}`}>允许资产（每行一个 id=目标）</Label>
                         <Textarea id={`branch-assets-${taskId}`} name="assets" rows={3} required placeholder={'asset-1=https://example.test\nartifact-2=local artifact'} disabled={busy} />
-                        <p className="text-xs text-muted-foreground">只填入此主任务已授权范围，服务端会校验资产归属。</p>
+                  <p className="text-xs text-muted-foreground">填写此主任务已授权的资产；启用后按此范围约束分支执行。</p>
                       </div>
                     </div>
                     <div className="grid gap-4 sm:grid-cols-3">
@@ -636,7 +687,7 @@ export function TeamBranches({
                       <input type="checkbox" name="auto_publish" disabled={busy} />允许协调器自动发布工作单
                     </label>
                     <div className="flex flex-wrap gap-2">
-                      <Button disabled={busy || !canManage}>{busy ? "正在启用…" : "启用分支协作"}</Button>
+                      <Button disabled={busy || !canEnable}>{busy ? "正在启用…" : "启用分支协作"}</Button>
                       <Button type="button" variant="outline" disabled={busy} onClick={() => setExpanded(false)}>取消</Button>
                     </div>
                   </form>
@@ -662,7 +713,32 @@ export function TeamBranches({
                 {loading && <span role="status">更新中</span>}
               </div>
             </div>
-            {data.policy.auto_publish && <p className="text-xs text-muted-foreground">协调器自动发布已允许；设备仍需自行领取分支，任务不会自动开始。</p>}
+            {branchManage && (
+              <section className="space-y-3 rounded-md border p-4" aria-labelledby={`branch-permissions-heading-${taskId}`}>
+                <div>
+                  <h3 id={`branch-permissions-heading-${taskId}`} className="font-medium">成员分支权限</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">每项权限独立授予或撤销，不会连带增加其他权限。分支授权仍受主任务的查看与执行权限边界约束。</p>
+                </div>
+                <div className="space-y-3">
+                  {members.map((member) => {
+                    const granted = new Set(data.permissions?.[String(member.id)] ?? []);
+                    return <fieldset key={member.id} className="space-y-2 rounded-md border p-3" disabled={busy || !!member.revoked}>
+                      <legend className="px-1 text-sm font-medium">{member.login}{member.revoked ? "（已撤销成员）" : ""}</legend>
+                      <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                        {branchPermissionKeys.map((permission) => {
+                          const id = `branch-permission-${taskId}-${member.id}-${permission}`;
+                          return <label key={permission} htmlFor={id} className="flex min-h-9 items-center gap-2 rounded-md border px-2 text-sm">
+                            <input id={id} type="checkbox" checked={granted.has(permission)} disabled={busy || !!member.revoked} onChange={(event) => { const grant = event.currentTarget.checked; void command("grant", { member_id: member.id, permission, revoke: !grant }, `${member.login}：已${grant ? "授予" : "撤销"}${permissionNames[permission]}权限。`); }} />
+                            {permissionNames[permission]}
+                          </label>;
+                        })}
+                      </div>
+                    </fieldset>;
+                  })}
+                </div>
+              </section>
+            )}
+            {data.policy.auto_publish && <p className="text-xs text-muted-foreground">协调器自动发布已允许；自动发布只生成可领取工作项，仍需成员认领、设备就绪并由管理者恢复主项目。</p>}
             {manage && (
               <section className="space-y-3 rounded-md border p-4" aria-labelledby={`branch-pool-heading-${taskId}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -682,6 +758,7 @@ export function TeamBranches({
                     const kind = String(values.get("kind") ?? "pentest");
                     const roleChoices = kind === "reverse" ? ["reverse_static", "reverse_reviewer"] : ["worker", "reviewer"];
                     const selectedMaterials = values.getAll("material_hashes").map(String);
+                    const coordinator = values.get("coordinator") === "on";
                     void command("publish", { work: {
                       title: String(values.get("title") ?? "").trim(), question: String(values.get("question") ?? "").trim(), kind,
                       asset_ids: values.getAll("asset_ids").map(String), material_hashes: selectedMaterials, roles: roleChoices,
@@ -689,7 +766,8 @@ export function TeamBranches({
                       budget: Number(values.get("budget")), resource_keys: String(values.get("resource_keys") ?? "").split(",").map((x) => x.trim()).filter(Boolean),
                       depends_on: values.getAll("depends_on").map(Number), restricted: values.get("restricted") === "on",
                       members: values.getAll("members").map(Number),
-                    } }, "工作单已发布到共享任务工作池。").then(() => form.reset());
+                      coordinator,
+                    } }, coordinator ? "协调器工作已发布；成员仍需认领，设备就绪后由管理者恢复主项目。" : "工作单已发布到共享任务工作池。成员认领后才会建立分支上下文。").then(() => form.reset());
                   }}>
                     <div className="grid gap-3 md:grid-cols-2">
                       <div className="space-y-2"><Label htmlFor={`work-title-${taskId}`}>工作单标题</Label><Input id={`work-title-${taskId}`} name="title" required maxLength={300} disabled={busy} /></div>
@@ -699,6 +777,7 @@ export function TeamBranches({
                       <fieldset className="space-y-2"><legend className="text-sm font-medium">可引用材料</legend><div className="flex flex-col gap-2">{data.policy.materials.map((material) => <label key={material.sha256} className="flex min-h-10 items-center gap-2 rounded-md border px-3 text-sm"><input type="checkbox" name="material_hashes" value={material.sha256} checked={newWorkMaterials.includes(material.sha256)} onChange={(e) => setNewWorkMaterials((current) => e.target.checked ? [...current, material.sha256] : current.filter((value) => value !== material.sha256))} disabled={busy} /><span className="truncate">{material.name}</span><span className="ml-auto text-xs text-muted-foreground">{material.sha256.slice(0, 12)}…</span></label>)}</div></fieldset>
                       <div className="space-y-2"><Label htmlFor={`work-budget-${taskId}`}>分支预算（请求与工具次数）</Label><Input id={`work-budget-${taskId}`} name="budget" type="number" min={1} max={data.policy.budget} defaultValue={10} required disabled={busy} /></div>
                       <div className="space-y-2"><Label htmlFor={`work-resources-${taskId}`}>共享互斥资源键（逗号分隔，可留空）</Label><Input id={`work-resources-${taskId}`} name="resource_keys" disabled={busy} /></div>
+                      <fieldset className="space-y-2 rounded-md border p-3"><legend className="px-1 text-sm font-medium">协调器设置</legend><label className="flex min-h-9 items-center gap-2 text-sm"><input type="checkbox" name="coordinator" disabled={busy} />作为协调器工作</label><p className="text-xs text-muted-foreground">角色沿用当前类型配置：渗透使用 worker/reviewer，逆向使用 reverse_static/reverse_reviewer。规划器无工具能力，复核角色只读材料；执行能力沿用启用时配置的角色策略。</p></fieldset>
                       <div className="space-y-2"><Label htmlFor={`work-depends-${taskId}`}>依赖分支</Label><select id={`work-depends-${taskId}`} name="depends_on" multiple className={`${controlClass} min-h-24`} disabled={busy}>{data.branches.filter((branch) => branch.state !== "cancelled").map((branch) => <option key={branch.id} value={branch.id}>分支 #{branch.id} · {branch.spec.title} · {stateNames[branch.state] ?? branch.state}</option>)}</select></div>
                       <fieldset className="space-y-2"><legend className="text-sm font-medium">访问范围</legend><label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" name="restricted" disabled={busy} />受限分支</label><label className="text-xs text-muted-foreground">受限分支仅对指定成员、贡献者和管理员可见。</label>{usableMembers.map((member) => <label key={member.id} className="flex min-h-9 items-center gap-2 text-sm"><input type="checkbox" name="members" value={member.id} disabled={busy} />{member.login}</label>)}</fieldset>
                     </div>
@@ -708,7 +787,7 @@ export function TeamBranches({
                 <div className="space-y-2">
                   {(data.pool ?? []).length === 0 ? <p className="text-sm text-muted-foreground">工作池为空。发布一个工作单后，成员可以选择自己的设备领取。</p> : data.pool.map((work) => (
                     <article key={work.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3">
-                      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{work.spec.title}</span><Badge variant="outline">{kindName(work.spec.kind)}</Badge><Badge variant="secondary">{stateNames[work.state] ?? work.state}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{work.spec.question}</p><p className="mt-1 text-xs text-muted-foreground">工作单 #{work.id} · 预算 {work.spec.budget}{work.branch_id ? ` · 分支 #${work.branch_id}` : ""}</p></div>
+                      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{work.spec.title}</span><Badge variant="outline">{kindName(work.spec.kind)}</Badge>{work.spec.coordinator && <Badge variant="outline">协调器工作</Badge>}<Badge variant="secondary">{stateNames[work.state] ?? work.state}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{work.spec.question}</p><p className="mt-1 text-xs text-muted-foreground">工作单 #{work.id} · 预算 {work.spec.budget}{work.branch_id ? ` · 分支 #${work.branch_id}` : ""}</p></div>
                       {work.state === "proposed" && <Button size="sm" disabled={busy || !manage} onClick={() => void command("approve", { work_id: work.id }, "工作单提议已批准。")}>批准提议</Button>}
                       {(work.state === "proposed" || work.state === "published") && <Button size="sm" variant="outline" disabled={busy} onClick={() => { const reason = window.prompt("取消未领取工作单的原因"); if (reason?.trim()) void command("cancel_work", { work_id: work.id, revision: data.revision, text: reason.trim() }, "未领取工作单已取消。"); }}>取消工作单</Button>}
                       {work.state === "published" && <form className="flex flex-wrap items-center gap-2" onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const device = Number(new FormData(form).get("device_id")); void command("claim", { work_id: work.id, device_id: device }, "已领取分支；设备就绪前不会开始执行。"); }}><Label className="sr-only" htmlFor={`claim-device-${work.id}`}>选择自己的执行设备</Label><select id={`claim-device-${work.id}`} name="device_id" required className="min-h-10 max-w-56 rounded-md border bg-background px-3 text-sm" disabled={busy}><option value="">选择自己的设备</option>{ownedDevices.map((device) => <option key={device.id} value={device.id}>{device.name} · #{device.id}</option>)}</select><Button size="sm" disabled={busy || ownedDevices.length === 0}>领取分支</Button></form>}

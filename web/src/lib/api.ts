@@ -142,7 +142,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
       document.cookie = "artex_token=; path=/; max-age=0";
       window.location.href = "/login";
     }
-    throw new Error("未授权");
+    throw Object.assign(new Error("未授权"), { status: r.status });
   }
   if (!r.ok) {
     const fallback = `${init?.method ?? "GET"} ${path}: ${r.status}`;
@@ -155,7 +155,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Keep the status-based fallback for empty or non-JSON error responses.
     }
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: r.status });
   }
   if (r.status === 204) return undefined as T;
   return r.json();

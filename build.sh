@@ -173,6 +173,13 @@ package_binary() {
   rm -rf "$package_root" "$archive"
   mkdir -p "$package_root"
   cp "$binary" "$package_root/"
+  node_name="artex-node"
+  [ "$goos" = "windows" ] && node_name="artex-node.exe"
+  cp "$(dirname "$binary")/$node_name" "$package_root/"
+  mkdir -p "$package_root/examples" "$package_root/docs"
+  cp examples/team-node*.json "$package_root/examples/"
+  cp examples/README.md "$package_root/examples/"
+  cp docs/team-onboarding.md docs/team-branches.md docs/team-shared-messages.md "$package_root/docs/"
   # 守护启动脚本是正式入口：页面上的一键更新要靠它在进程退出后重新拉起，
   # 直接跑 artex 本体的话更新完就再也起不来了。按目标系统只带对应的那一份。
   if [ "$goos" = "windows" ]; then
@@ -224,6 +231,11 @@ build_target() {
     ./cmd/artex
 
   compress_binary "$output" "$goos"
+  node_name="artex-node"
+  [ "$goos" = "windows" ] && node_name="artex-node.exe"
+  GOSUMDB="$ARTEX_GOSUMDB" CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+    go build -trimpath -ldflags "-s -w -buildid= -X main.version=${ARTEX_BUILD_VERSION}" \
+    -o "$(dirname "$output")/$node_name" ./cmd/artex-node
   if command -v file >/dev/null 2>&1; then file "$output"; fi
   if [ "$ARTEX_PACKAGE" = "1" ]; then package_binary "$output" "$goos" "$goarch"; fi
   ok "编译完成：$output"

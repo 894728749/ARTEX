@@ -38,7 +38,7 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 | [`artex-optimized`](RELEASES.md#artex-optimized) | 源码里程碑 | 执行合同、调度与证据验收，以及实时引导和漏洞整理 |
 | [`artex-baseline`](RELEASES.md#artex-baseline) | 源码里程碑 | ARTEX 0.3.15 原始源码备份基线 |
 
-执行机制见 [执行链路验收与调度](docs/执行链路验收与调度.md)。跨设备协作入口、节点配置示例和权限边界见 [协作配置与执行说明](examples/README.md)。
+执行机制见 [执行链路验收与调度](docs/执行链路验收与调度.md)。首次跨设备接入见 [成员网页、TLS、Node 与权限配置步骤](docs/team-onboarding.md)；已有部署的节点配置和权限边界见 [协作配置与执行说明](examples/README.md)。
 
 ---
 

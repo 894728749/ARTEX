@@ -228,10 +228,20 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "材料数量超过上限")
 		return
 	}
-	artifacts, e := s.m.pg.ListReverseArtifacts(t.ID)
-	if e != nil {
-		writeErr(w, 500, "无法读取材料")
-		return
+	var artifacts []db.ReverseArtifact
+	// Pentest tasks have no reverse-artifact collection. An empty selection must
+	// not call the reverse-only API and prevent their branch mode from enabling.
+	if len(in.ArtifactIDs) > 0 {
+		if t.Kind != "reverse" {
+			writeErr(w, 403, "渗透主任务不能引用逆向任务材料，请通过跨流程协助绑定材料")
+			return
+		}
+		var err error
+		artifacts, err = s.m.pg.ListReverseArtifacts(t.ID)
+		if err != nil {
+			writeErr(w, 500, "无法读取材料")
+			return
+		}
 	}
 	for _, aid := range in.ArtifactIDs {
 		var found *db.ReverseArtifact

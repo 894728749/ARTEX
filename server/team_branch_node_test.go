@@ -166,7 +166,7 @@ func TestBranchRealNodeContinuousPlanningAndIndependentReview(t *testing.T) {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer model.Close()
-	host := httptest.NewTLSServer(s.Handler())
+	host := httptest.NewTLSServer(s.TeamHandler())
 	defer host.Close()
 	cert, e := x509.ParseCertificate(host.TLS.Certificates[0].Certificate[0])
 	if e != nil {
