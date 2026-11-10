@@ -9,7 +9,7 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 📦 **源码仓库：** [cyy081021/ARTEX](https://github.com/cyy081021/ARTEX) · **ARTEX Releases：** [正式版本发布页](https://github.com/cyy081021/ARTEX/releases)
 
-本仓库在 ARTEX 0.3.15 源码备份基础上继续维护。`artex-*` 标签保留源码里程碑；带下载包的正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
+当前正式版本为 **v0.5.0**。`artex-*` 标签是历史源码里程碑，不是正式下载版本；正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
 
 </div>
 
@@ -25,15 +25,18 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 协作者部署可使用 [v0.4.0 脱敏运行交接材料](profiles/runtime-handoff-v0.4.0/RUNBOOK.zh-CN.md) 或下载 [交接 ZIP](https://github.com/cyy081021/ARTEX/releases/download/v0.4.0/ARTEX-runtime-handoff-v0.4.0.zip)。材料包含实际 integrations 启动脚本、网关源码、依赖锁、16 个 Agent/11 个 MCP 的配置快照、触发与审批配置、版本及校验记录；依赖和模型凭据需在目标设备自行配置，已有 9 个 Agent 可按差异核对，无需重录。
 
-里程碑标签及各标签的具体内容见 [发布说明](RELEASES.md)：
+版本标签及逐版说明见 [发布说明](RELEASES.md)：
 
-| 标签 | 版本内容 |
-| --- | --- |
-| `artex-baseline` | 最开始的 ARTEX 0.3.15 源码备份 |
-| `artex-optimized` | 实时引导与漏洞整理、执行合同、依赖调度、证据验收、收尾及关联图优化 |
-| `artex-reverse-v1` | 独立逆向流程与运行时观察、消息实时补取及报告重写修复、本地配置包 |
-| `artex-reverse-v1.1` | APK 派生材料与 Hermes 静态检查、稳定验收 ID、范围化证据读取、依赖恢复和任务流重连 |
-| `artex-collaboration-v1` | 小团队跨设备协作：显式派发队列、设备能力匹配、动态观察授权、LAN/Relay 恢复、耐久证据及只读历史 |
+| 标签 | 类型 | 摘要 |
+| --- | --- | --- |
+| [`v0.5.0`](RELEASES.md#v050) | 正式版 | 共享主任务执行分支、团队指导与回执、跨流程协助、证据失效和独立复核 |
+| [`v0.4.1`](RELEASES.md#v041) | 正式版 | 内置提示词安全升级、版本并发保护及资产覆盖统计修正 |
+| [`v0.4.0`](RELEASES.md#v040) | 正式版 | 迁移正式下载与在线更新源，建立二进制和容器发布流程，包含协作 v1 功能 |
+| [`artex-collaboration-v1`](RELEASES.md#artex-collaboration-v1) | 源码里程碑 | 小团队跨设备派发、能力匹配、动态观察授权、LAN/Relay 恢复及独立复核 |
+| [`artex-reverse-v1.1`](RELEASES.md#artex-reverse-v11) | 源码里程碑 | APK 派生材料、Hermes 检查、稳定验收 ID、范围化证据与任务流恢复 |
+| [`artex-reverse-v1`](RELEASES.md#artex-reverse-v1) | 源码里程碑 | 独立逆向流程、运行时观察、报告修复及本地配置包 |
+| [`artex-optimized`](RELEASES.md#artex-optimized) | 源码里程碑 | 执行合同、调度与证据验收，以及实时引导和漏洞整理 |
+| [`artex-baseline`](RELEASES.md#artex-baseline) | 源码里程碑 | ARTEX 0.3.15 原始源码备份基线 |
 
 执行机制见 [执行链路验收与调度](docs/执行链路验收与调度.md)。跨设备协作入口、节点配置示例和权限边界见 [协作配置与执行说明](examples/README.md)。
 
@@ -203,7 +206,7 @@ cd ARTEX
 ```bash
 cd ARTEX
 git pull                       # 更新 compose / 脚本（可选）
-# 指定正式版本：在 .env 设 ARTEX_TAG=v0.4.0；不设则用 latest（v0.4.0 发布后可用）
+# 指定正式版本：在 .env 设 ARTEX_TAG=v0.5.0；不设则使用 latest（当前指向最新正式版）
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
