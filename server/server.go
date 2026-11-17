@@ -246,6 +246,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		}
 		go s.runFindingReviewScheduler()
 		_, _ = m.pg.Exec(`UPDATE reverse_runtime_runs SET status='failed',last_error='服务中断；自有运行环境的清理需核对，未自动重试',finished_at=now() WHERE status='running'`)
+		_, _ = m.pg.Exec(`UPDATE reverse_native_runs n SET target_state='failed' FROM reverse_runtime_runs r WHERE n.run_id=r.id AND r.status='failed' AND n.target_state IN ('starting','running','stopped')`)
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
@@ -675,6 +676,7 @@ func (s *Server) Handler() http.Handler {
 	s.workflowRoutes(mux)
 	s.reverseRuntimeRoutes(mux)
 	s.reverseDebugRoutes(mux)
+	s.reverseNativeRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -1207,7 +1209,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"` // cancel(删除)时必填:删除原因
 		Mode   string `json:"mode"`   // cancel 专用:soft(默认,假删除)| hard(真删除,级联移除独占子孙)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
@@ -1489,19 +1491,20 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
-	Kind                 string   `json:"kind,omitempty"`
-	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
-	CategoryID           *int64   `json:"category_id,omitempty"`
-	Description          string   `json:"description"`
-	Goal                 string   `json:"goal"`
-	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
-	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
-	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
-	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
-	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	Kind                 string             `json:"kind,omitempty"`
+	MaterialHints        []taskMaterialHint `json:"material_hints,omitempty"`
+	Name                 string             `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
+	CategoryID           *int64             `json:"category_id,omitempty"`
+	Description          string             `json:"description"`
+	Goal                 string             `json:"goal"`
+	LLMProfileID         *int64             `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	LLMProfileIDs        []int64            `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
+	SourceTaskIDs        []string           `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
+	CompanyIDs           []int64            `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
+	TimeoutSeconds       int                `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int                `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
+	SeedFirstIntent      *bool              `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	CoverageEnabled      *bool              `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1512,6 +1515,41 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
+	if len(req.LLMProfileIDs) == 0 && req.LLMProfileID != nil {
+		req.LLMProfileIDs = []int64{*req.LLMProfileID}
+	}
+	var route *taskRouteResult
+	if req.Kind == "auto" {
+		if strings.TrimSpace(req.Description) == "" || strings.TrimSpace(req.Goal) == "" {
+			writeErr(w, 400, "请填写描述与目标")
+			return
+		}
+		if len(req.MaterialHints) > 64 {
+			writeErr(w, 400, "材料数量过多")
+			return
+		}
+		for _, hint := range req.MaterialHints {
+			if strings.TrimSpace(hint.Name) == "" || len(hint.Name) > 255 || hint.Size < 0 {
+				writeErr(w, 400, "材料信息无效")
+				return
+			}
+		}
+		var prov llm.Provider
+		if len(req.LLMProfileIDs) > 0 {
+			prov, _, _ = s.providerForProfile(req.LLMProfileIDs[0])
+		} else {
+			s.cfgMu.Lock()
+			prov = s.llmProv
+			s.cfgMu.Unlock()
+		}
+		result, err := classifyTask(r.Context(), prov, req.Description, req.Goal, req.MaterialHints)
+		if err != nil {
+			writeErr(w, 503, err.Error())
+			return
+		}
+		route = &result
+		req.Kind = result.PrimaryKind
+	}
 	if req.Kind == "" {
 		req.Kind = "pentest"
 	}
@@ -1521,9 +1559,6 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Description) == "" {
 		req.Description = "未命名任务"
-	}
-	if len(req.LLMProfileIDs) == 0 && req.LLMProfileID != nil {
-		req.LLMProfileIDs = []int64{*req.LLMProfileID}
 	}
 	if req.Kind == "reverse" {
 		disabled := false
@@ -1589,18 +1624,47 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if route != nil {
+		routeJSON, _ := json.Marshal(route)
+		_, _ = t.Store.AppendActivity(db.Activity{Worker: "system", Kind: "text", Summary: "AI 初步路由：" + map[string]string{"pentest": "渗透测试", "reverse": "逆向分析"}[route.PrimaryKind], Detail: string(routeJSON)})
+	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
 	if req.Kind == "reverse" {
 		if err := s.m.SetTaskPaused(t.ID, true); err != nil {
 			writeErr(w, 500, "暂停逆向任务失败: "+err.Error())
 			return
 		}
+		if route != nil {
+			for _, capability := range route.Capabilities {
+				if capability == "native" {
+					id, _ := strconv.ParseInt(t.ID, 10, 64)
+					if err := s.m.pg.SetNativeConfig(r.Context(), id, "analysis"); err != nil {
+						writeErr(w, 500, "任务已创建，但原生配置初始化失败")
+						return
+					}
+				}
+			}
+			writeJSON(w, 201, map[string]any{"task": taskDTO(t, s.resolvedTaskStatus(t)), "route": route})
+			return
+		}
 		writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
+		return
+	}
+	if route != nil && len(req.MaterialHints) > 0 {
+		if err := s.m.SetTaskPaused(t.ID, true); err != nil {
+			writeErr(w, 500, "任务材料等待状态写入失败")
+			return
+		}
+		writeJSON(w, 201, map[string]any{"task": taskDTO(t, s.resolvedTaskStatus(t)), "route": route})
 		return
 	}
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
+	if route != nil {
+		writeJSON(w, 201, map[string]any{"task": taskDTO(t, s.resolvedTaskStatus(t)), "route": route})
+		return
+	}
 	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
 }
 

@@ -145,6 +145,12 @@ func (s *Server) teamTaskNative(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				handler = s.reverseConclusionList
+			case "reverse/native":
+				if task.Kind != "reverse" {
+					deny()
+					return
+				}
+				handler = s.nativeState
 			case "reverse/runtime":
 				if task.Kind != "reverse" {
 					deny()

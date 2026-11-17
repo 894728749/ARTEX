@@ -2,7 +2,8 @@
 // Derived from the functional spec (section 7: 关键数据形状).
 
 export type TaskStatus = "created" | "queued" | "running" | "finalizing" | "paused" | "done" | "failed" | "timeout";
-export type TaskKind = "pentest" | "reverse";
+export type TaskKind = "pentest" | "reverse" | "auto";
+export type TaskRoute = { primary_kind: "pentest" | "reverse"; capabilities: ("web" | "reverse" | "native")[]; reason: string; needs_materials: string[] };
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {

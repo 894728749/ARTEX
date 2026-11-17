@@ -1706,3 +1706,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_team_queued_intent ON team_dispatch_queue(i
 -- longer multi-step session. Legacy one-shot observations still cap at 60s.
 ALTER TABLE reverse_runtime_policies DROP CONSTRAINT IF EXISTS reverse_runtime_policies_max_duration_ms_check;
 ALTER TABLE reverse_runtime_policies ADD CONSTRAINT reverse_runtime_policies_max_duration_ms_check CHECK(max_duration_ms BETWEEN 100 AND 900000);
+
+-- Native evidence is versioned independently of the legacy runtime status.
+CREATE TABLE IF NOT EXISTS reverse_native_configs (
+ task_id bigint PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+ mode text NOT NULL CHECK(mode IN ('analysis','pwn')), revision bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS reverse_native_cases (
+ id bigserial PRIMARY KEY, task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ artifact_id bigint NOT NULL REFERENCES reverse_artifacts(id) ON DELETE CASCADE,
+ intent_id bigint NOT NULL, profile_id text NOT NULL, title text NOT NULL,
+ argv jsonb NOT NULL DEFAULT '[]', input_base64 text NOT NULL,
+ expected_exit integer, expected_signal integer, sha256 text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), CHECK((expected_exit IS NULL) <> (expected_signal IS NULL))
+);
+CREATE TABLE IF NOT EXISTS reverse_native_runs (
+ run_id bigint PRIMARY KEY REFERENCES reverse_runtime_runs(id) ON DELETE CASCADE,
+ task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ artifact_id bigint NOT NULL REFERENCES reverse_artifacts(id) ON DELETE CASCADE,
+ intent_id bigint NOT NULL DEFAULT 0, case_id bigint REFERENCES reverse_native_cases(id) ON DELETE SET NULL,
+ config_revision bigint NOT NULL, mode text NOT NULL CHECK(mode IN ('exec','debug','replay')),
+ target_state text NOT NULL DEFAULT 'starting', result_path text NOT NULL DEFAULT '', observation jsonb NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS finding_native_evidence (
+ finding_id bigint PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+ source_task_id bigint NOT NULL, conclusion_id bigint NOT NULL, case_id bigint NOT NULL, run_id bigint NOT NULL,
+ sha256 text NOT NULL, snapshot jsonb NOT NULL,
+ UNIQUE(source_task_id,conclusion_id)
+);
+CREATE INDEX IF NOT EXISTS reverse_native_runs_task_idx ON reverse_native_runs(task_id,run_id);
+ALTER TABLE reverse_native_cases ADD COLUMN IF NOT EXISTS replay_plan jsonb;
+ALTER TABLE reverse_runtime_policies ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
+ALTER TABLE reverse_conclusions ADD COLUMN IF NOT EXISTS native_case_id bigint;
+ALTER TABLE reverse_conclusions ADD COLUMN IF NOT EXISTS native_run_id bigint;
+ALTER TABLE reverse_conclusions ADD COLUMN IF NOT EXISTS native_case_sha256 text;
+ALTER TABLE reverse_conclusions ADD COLUMN IF NOT EXISTS native_policy_revision bigint;
+ALTER TABLE reverse_native_cases DROP CONSTRAINT IF EXISTS reverse_native_cases_check;
+ALTER TABLE reverse_native_cases DROP CONSTRAINT IF EXISTS reverse_native_cases_assertion_check;
+ALTER TABLE reverse_native_cases ADD CONSTRAINT reverse_native_cases_assertion_check CHECK (
+  ((expected_exit IS NOT NULL)::int + (expected_signal IS NOT NULL)::int +
+   (COALESCE(replay_plan->'assertion','null'::jsonb) <> 'null'::jsonb)::int) = 1
+);

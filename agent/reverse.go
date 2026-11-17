@@ -92,7 +92,7 @@ func ReverseToolAllowed(name string) bool {
 
 func reverseBuiltinToolAllowed(name string) bool {
 	switch name {
-	case "graph_overview", "node_detail", "list_facts", "list_goals", "list_intents", "list_hints", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_worker_traces", "add_intent", "record_fact", "prove_goal", "set_goals", "add_hint", "set_constraints", "list_constraints", "update_constraint", "complete_intent", "retry_intent", "record_planning_decision", "steer_work", "kill_work", "pause_task", "pause_task_after_tool", "TodoRead", "TodoWrite", "Read", "LS", "Glob", "Grep", "reverse_workspace", "reverse_submit_conclusion", "reverse_review_conclusion", "reverse_get_conclusion", "reverse_read_evidence", "reverse_prepare_apk", "reverse_inspect_hermes", "reverse_read_derived", "rea_catalog", "rea_call", "rea_analyze_artifact", "reverse_evidence_view", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
+	case "native_inspect", "native_session", "native_case", "native_review", "native_publish_finding", "graph_overview", "node_detail", "list_facts", "list_goals", "list_intents", "list_hints", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_worker_traces", "add_intent", "record_fact", "prove_goal", "set_goals", "add_hint", "set_constraints", "list_constraints", "update_constraint", "complete_intent", "retry_intent", "record_planning_decision", "steer_work", "kill_work", "pause_task", "pause_task_after_tool", "TodoRead", "TodoWrite", "Read", "LS", "Glob", "Grep", "reverse_workspace", "reverse_submit_conclusion", "reverse_review_conclusion", "reverse_get_conclusion", "reverse_read_evidence", "reverse_prepare_apk", "reverse_inspect_hermes", "reverse_read_derived", "rea_catalog", "rea_call", "rea_analyze_artifact", "reverse_evidence_view", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 		return true
 	default:
 		return false
@@ -108,6 +108,7 @@ const reverseCommon = `你在 ARTEX 的独立自动化逆向工作流中。任�
 artifact_id 是逆向材料编号，不能作为资产 asset_ids 使用；record_fact/add_intent/add_hint 不传 asset_ids，材料引用写在证据和说明中。读取旧运行结果优先 reverse_read_evidence 按规范 facet 读取，需要细粒度 JSON Pointer 时使用 reverse_evidence_view；它们可解析 JSON 字符串结果，按返回字段选择并分页。读取派生材料使用 reverse_read_derived。记录运行消息优先 send({...})，console.log 也会作为日志保留。独立核验首先重读已保存的原始证据；只有问题或证据缺口要求时才重复运行，避免把无关附加检查变成完成条件。
 聚合结论逐项引用已接受源结论的编号和证据版本，明确新增断言、冲突和未决项。复核汇总时检查映射、遗漏与新增推断，抽查支撑关键断言的原始证据；不要为了重复已完成的局部核验而重新取证全部材料。源版本变化或新增推断仍须独立验证，不能靠接受状态代替证据。
 目标分解必须保留用户要求的交付层级：行为解释、静态候选和已验证漏洞分别验收。用户要求漏洞验证时，应显式登记仍需的动态/服务端验证问题和授权环境；环境不足就等待或交付未决，不以静态候选清单证明已获得业务漏洞。只在已有授权范围和已配置的流程内请求跨流程协助。
+Linux x86-64 二进制问题先用 native_inspect 记录 ELF 和防护迹象；动态工作使用 native_session 和 native_case，仅允许已授权 Docker 环境。native_session 的 debug 模式只允许类型化 GDB/MI 操作，exec 模式字节收发用 base64，不假设文本编码。native_case 保存不可变输入与预期退出/信号，独立 reviewer 必须另起重放 run，并用 native_review 绑定案例哈希与重放证据。native_case repeat 返回 n/N；v2 可登记依赖、loader、Python harness 和文件输入。harness stdout 不能替代目标输出断言。只有接受的结论及独立成功重放能通过 native_publish_finding 形成漏洞证据；crash/退出匹配不是代码执行证明。模式改变不授予权限；无环境则报告恢复条件。
 使用已有调度合同、依赖、预算、暂停和完成协议。工作目录保存完整原始结果，模型按摘要和分页读取。`
 
 func reverseSystem(role, goal, workDir string) string {
@@ -217,4 +218,16 @@ func (t *reverseGraphTool) Call(ctx context.Context, in json.RawMessage, tc *act
 		return actool.Errorf("逆向材料 artifact_id 不能传入 asset_ids；请移除 asset_ids，在 detail/evidence 中保留材料与证据引用。此次未写入。"), nil
 	}
 	return t.CoreTool.Call(ctx, in, tc)
+}
+
+// Native jobs cannot escape the isolated runner through external skills/MCP.
+func NativeToolAllowed(name string) bool {
+	if name == "Skill" || strings.HasPrefix(name, "mcp__") {
+		return false
+	}
+	switch name {
+	case "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
+		return false
+	}
+	return reverseBuiltinToolAllowed(name) || name == "request_workflow_help" || name == "list_workflow_requests" || name == "return_workflow_result" || name == "cancel_workflow_request"
 }

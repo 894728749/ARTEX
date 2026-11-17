@@ -29,11 +29,17 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 	}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		var reverseExtra []actool.CoreTool
+		nativeRestricted := false
 		reverseCleanup := func() {}
 		if info := agent.RunInfoFrom(ctx); info.TaskID > 0 {
 			if task, err := pg.GetTask(info.TaskID); err == nil && task != nil && task.Kind == "reverse" {
 				reverseExtra, _, reverseCleanup = reverseAgentTools(ctx, pg, task, workDir, agentKey)
+				cfg, cfgErr := pg.NativeConfig(task.ID)
+				nativeRestricted = cfgErr != nil || cfg.Revision > 0
 			}
+		}
+		if nativeRestricted {
+			return reverseExtra, agent.DeferredInfo{NativeRestricted: true}, reverseCleanup
 		}
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {

@@ -24,6 +24,7 @@ import (
 )
 
 type reverseRuntimeProfile struct {
+	Engine       string         `json:"engine,omitempty"`
 	ID           string         `json:"id"`
 	Name         string         `json:"name"`
 	Platform     string         `json:"platform"`
@@ -64,6 +65,12 @@ func reverseRuntimeProfiles() ([]reverseRuntimeProfile, error) {
 		seen[p.ID] = true
 		if p.Settings == nil {
 			p.Settings = map[string]any{}
+		}
+		if p.Engine != "" && p.Engine != "frida" && p.Engine != "docker-native" {
+			return nil, errors.New("unsupported runtime engine")
+		}
+		if p.Engine == "docker-native" && p.Platform != "linux" {
+			return nil, errors.New("native requires linux platform")
 		}
 		p.Settings["platform"] = p.Platform
 	}
@@ -187,7 +194,13 @@ func (s *Server) reverseDebugRoutes(mux *http.ServeMux) {
 				ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 				var doctor map[string]any
 				var err error
-				if p.Platform == "browser" {
+				if p.Engine == "docker-native" {
+					doctor, err = nativeDoctor(ctx, p)
+					if doctor == nil {
+						doctor = map[string]any{}
+					}
+					doctor["platform"] = p.Platform
+				} else if p.Platform == "browser" {
 					doctor, err = reverseBrowserDoctor(ctx, p)
 				} else {
 					var raw []byte
@@ -282,7 +295,7 @@ func reverseDebugTool(pg *db.DB, task *db.Task, info agent.RunInfo, workDir stri
 				break
 			}
 		}
-		if selected == nil || selected.Platform == "browser" {
+		if selected == nil || selected.Platform == "browser" || selected.Engine == "docker-native" {
 			return actool.Errorf("运行环境未配置"), nil
 		}
 		release, err := acquireReverseDevice(*selected)

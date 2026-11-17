@@ -16,11 +16,12 @@ import (
 // UnlockSkill unlocks a named skill's MCPs — hosts call it to rebuild the unlock set
 // from history on a resumed session (design doc C2).
 type DeferredInfo struct {
-	FindingGuidance string            // derived from the final permitted tools, including DB overrides
-	Deferred        []string          // all MCP tool names (schema withheld)
-	GlobalNames     []string          // MCP names to list in the system-prompt block
-	Unlock          *actool.UnlockSet // shared call-gate; nil when no MCP tools
-	UnlockSkill     func(skillName string)
+	NativeRestricted bool              // final native capability boundary after all augmentation and DB overrides
+	FindingGuidance  string            // derived from the final permitted tools, including DB overrides
+	Deferred         []string          // all MCP tool names (schema withheld)
+	GlobalNames      []string          // MCP names to list in the system-prompt block
+	Unlock           *actool.UnlockSet // shared call-gate; nil when no MCP tools
+	UnlockSkill      func(skillName string)
 }
 
 // ToolAugment, if set, returns the EXTRA tools an agent should see beyond its
@@ -62,6 +63,19 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	}
 	if IsReverse(ctx) {
 		out = reverseTools(out)
+		if def.NativeRestricted {
+			permitted := out[:0]
+			for _, t := range out {
+				if NativeToolAllowed(t.Name()) {
+					permitted = append(permitted, t)
+				}
+			}
+			out = permitted
+			def.Deferred = nil
+			def.GlobalNames = nil
+			def.Unlock = nil
+			def.UnlockSkill = nil
+		}
 	} else {
 		out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
 	}

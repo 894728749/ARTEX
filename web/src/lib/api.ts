@@ -83,6 +83,7 @@ import type {
   SSTask,
   Stats,
   Task,
+  TaskRoute,
   TaskKind,
   ReverseArtifact,
   ReverseConclusion,
@@ -287,8 +288,9 @@ return {
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
     interceptRules?: AssetInterceptRuleInput[];
+    materialHints?: { name: string; size: number }[];
   }) =>
-    post<Task>("/tasks", {
+    post<Task | { task: Task; route: TaskRoute }>("/tasks", {
       name: input.name ?? "",
       kind: input.kind ?? "pentest",
       workflow_version: 1,
@@ -303,7 +305,8 @@ return {
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
-    }),
+      material_hints: input.materialHints ?? [],
+    }).then((r) => "task" in r ? r : { task: r, route: undefined }),
   reverseArtifacts: (taskId: string) => get<ReverseArtifact[]>(`/tasks/${encodeURIComponent(taskId)}/reverse/artifacts`).then(arr),
   workflowRequests: (taskId: string) => get<WorkflowRequest[]>(`/tasks/${encodeURIComponent(taskId)}/workflow-requests`).then(arr),
   createWorkflowRequest: (taskId: string, input: WorkflowRequestCreateInput) =>

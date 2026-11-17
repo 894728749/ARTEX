@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 4
+	TaskArchiveFormatVersion       = 5
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -556,6 +556,181 @@ UNION SELECT value::bigint FROM findings finding
       ) value WHERE finding.task_id=$1 AND value ~ '^[0-9]+$'`
 }
 
+// validateNativeArchiveScope prevents a malformed or externally supplied
+// snapshot from importing references owned by another task. Older packages did
+// not contain these tables and remain readable without this v5 check.
+func validateNativeArchiveScope(snapshot *TaskArchiveSnapshot) error {
+	if snapshot == nil {
+		return nil
+	}
+	if snapshot.FormatVersion < 5 {
+		for _, table := range []string{"reverse_native_configs", "reverse_native_cases", "reverse_native_runs", "finding_native_evidence"} {
+			if rawRowCount(snapshot.Tables[table]) > 0 {
+				return errors.New("legacy archive cannot contain native evidence tables")
+			}
+		}
+		return nil
+	}
+	for _, table := range []string{"reverse_native_configs", "reverse_native_cases", "reverse_native_runs", "finding_native_evidence"} {
+		if _, ok := snapshot.Tables[table]; !ok {
+			return fmt.Errorf("missing %s table", table)
+		}
+	}
+	decode := func(table string) ([]map[string]any, error) {
+		rows, err := decodeArchiveRows(snapshot.Tables[table])
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", table, err)
+		}
+		return rows, nil
+	}
+	idSet := func(table, field string) (map[int64]map[string]any, error) {
+		rows, err := decode(table)
+		if err != nil {
+			return nil, err
+		}
+		ids := make(map[int64]map[string]any, len(rows))
+		for _, row := range rows {
+			id, ok := jsonInt64(row[field])
+			if !ok || id <= 0 {
+				return nil, fmt.Errorf("%s contains invalid %s", table, field)
+			}
+			ids[id] = row
+		}
+		return ids, nil
+	}
+	for _, table := range []string{"reverse_native_configs", "reverse_native_cases", "reverse_native_runs"} {
+		rows, err := decode(table)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			owner, ok := jsonInt64(row["task_id"])
+			if !ok || owner != snapshot.TaskID {
+				return fmt.Errorf("%s contains a row owned by another task", table)
+			}
+		}
+	}
+	artifacts, err := idSet("reverse_artifacts", "id")
+	if err != nil {
+		return err
+	}
+	nodes, err := idSet("exploration_nodes", "id")
+	if err != nil {
+		return err
+	}
+	runtimeRuns, err := idSet("reverse_runtime_runs", "id")
+	if err != nil {
+		return err
+	}
+	cases, err := idSet("reverse_native_cases", "id")
+	if err != nil {
+		return err
+	}
+	runs, err := idSet("reverse_native_runs", "run_id")
+	if err != nil {
+		return err
+	}
+	conclusions, err := idSet("reverse_conclusions", "id")
+	if err != nil {
+		return err
+	}
+	for id, row := range cases {
+		artifactID, _ := jsonInt64(row["artifact_id"])
+		intentID, _ := jsonInt64(row["intent_id"])
+		node := nodes[intentID]
+		if artifacts[artifactID] == nil || node == nil || node["kind"] != "intent" {
+			return fmt.Errorf("reverse_native_cases row %d has a cross-task artifact or intent", id)
+		}
+		if row["replay_plan"] != nil {
+			raw, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			var c NativeCase
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return fmt.Errorf("reverse_native_cases row %d: %w", id, err)
+			}
+			digest := c.SHA256
+			if err := ValidateNativeCase(&c); err != nil {
+				return fmt.Errorf("reverse_native_cases row %d: %w", id, err)
+			}
+			if c.SHA256 != digest {
+				return fmt.Errorf("reverse_native_cases row %d has a replay plan hash mismatch", id)
+			}
+			for _, b := range c.ReplayPlan.Target.Bindings() {
+				if artifacts[b.ArtifactID] == nil || artifacts[b.ArtifactID]["sha256"] != b.SHA256 {
+					return fmt.Errorf("case %d attachment outside archive or changed", id)
+				}
+			}
+			if parent := c.ReplayPlan.ParentCaseID; parent > 0 {
+				if cases[parent] == nil || cases[parent]["artifact_id"] != row["artifact_id"] || parent >= id {
+					return fmt.Errorf("case %d has invalid parent version", id)
+				}
+			}
+		}
+	}
+	for id, row := range runs {
+		runtimeID, runtimeOK := jsonInt64(row["run_id"])
+		runtime := runtimeRuns[runtimeID]
+		artifactID, _ := jsonInt64(row["artifact_id"])
+		caseID, caseOK := jsonInt64(row["case_id"])
+		intentID, _ := jsonInt64(row["intent_id"])
+		runtimeTaskID, runtimeTaskOK := jsonInt64(runtime["task_id"])
+		runtimeArtifactID, runtimeArtifactOK := jsonInt64(runtime["artifact_id"])
+		if !runtimeOK || runtime == nil || !runtimeTaskOK || runtimeTaskID != snapshot.TaskID || !runtimeArtifactOK || runtimeArtifactID != artifactID || artifacts[artifactID] == nil || (caseOK && caseID > 0 && cases[caseID] == nil) {
+			return fmt.Errorf("reverse_native_runs row %d has a cross-task runtime, artifact, or case", id)
+		}
+		if caseID > 0 {
+			caseArtifactID, _ := jsonInt64(cases[caseID]["artifact_id"])
+			if caseArtifactID != artifactID {
+				return fmt.Errorf("reverse_native_runs row %d uses a case for another artifact", id)
+			}
+		}
+		if intentID > 0 {
+			intent := nodes[intentID]
+			if intent == nil || intent["kind"] != "intent" {
+				return fmt.Errorf("reverse_native_runs row %d has a cross-task intent", id)
+			}
+		}
+	}
+	findings, err := idSet("findings", "id")
+	if err != nil {
+		return err
+	}
+	for _, c := range conclusions {
+		caseID, has := jsonInt64(c["native_case_id"])
+		if !has || caseID == 0 {
+			continue
+		}
+		runID, _ := jsonInt64(c["native_run_id"])
+		reviewer, _ := jsonInt64(c["reviewer_intent_id"])
+		k, n := cases[caseID], runs[runID]
+		if k == nil || n == nil || k["sha256"] != c["native_case_sha256"] || n["case_id"] != k["id"] || nodes[reviewer] == nil {
+			return errors.New("native review archive binding is invalid")
+		}
+	}
+	rows, err := decode("finding_native_evidence")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		findingID, fOK := jsonInt64(row["finding_id"])
+		ownerID, oOK := jsonInt64(row["source_task_id"])
+		caseID, cOK := jsonInt64(row["case_id"])
+		runID, rOK := jsonInt64(row["run_id"])
+		conclusionID, conclusionOK := jsonInt64(row["conclusion_id"])
+		finding := findings[findingID]
+		findingOwner, findingOwnerOK := jsonInt64(finding["task_id"])
+		run := runs[runID]
+		runtimeID, runtimeOK := jsonInt64(run["run_id"])
+		runCaseID, runCaseOK := jsonInt64(run["case_id"])
+		if !fOK || !oOK || !cOK || !rOK || !conclusionOK || ownerID != snapshot.TaskID || !findingOwnerOK || findingOwner != snapshot.TaskID || cases[caseID] == nil || run == nil || !runtimeOK || runtimeRuns[runtimeID] == nil || !runCaseOK || runCaseID != caseID || conclusions[conclusionID] == nil {
+			return errors.New("finding_native_evidence contains a cross-task or incomplete reference")
+		}
+	}
+	return nil
+}
+
 // SnapshotTaskArchive reads one repeatable PostgreSQL snapshot. Task-owned Agent
 // writes are already quiescent at the server barrier; repeatable-read also keeps
 // the asset and accounting views mutually consistent during serialization.
@@ -600,6 +775,9 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"reverse_conclusions", `SELECT * FROM reverse_conclusions WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"reverse_runtime_policies", `SELECT * FROM reverse_runtime_policies WHERE task_id=$1`, []any{taskID}},
 		{"reverse_runtime_runs", `SELECT * FROM reverse_runtime_runs WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"reverse_native_configs", `SELECT * FROM reverse_native_configs WHERE task_id=$1`, []any{taskID}},
+		{"reverse_native_cases", `SELECT * FROM reverse_native_cases WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"reverse_native_runs", `SELECT * FROM reverse_native_runs WHERE task_id=$1 ORDER BY run_id`, []any{taskID}},
 		{"explorations", `SELECT * FROM explorations WHERE id=$1`, []any{expID}},
 		{"exploration_nodes", `SELECT * FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"exploration_edges", `SELECT * FROM exploration_edges WHERE exploration_id=$1 ORDER BY src_id,dst_id`, []any{expID}},
@@ -620,6 +798,7 @@ UNION ALL SELECT 'team_branch_workflow',w.id::text,to_jsonb(w) FROM team_branch_
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"finding_native_evidence", `SELECT evidence.* FROM finding_native_evidence evidence JOIN findings finding ON finding.id=evidence.finding_id WHERE finding.task_id=$1 ORDER BY evidence.finding_id`, []any{taskID}},
 		{"finding_relations", `SELECT * FROM finding_relations WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"finding_consolidations", `SELECT * FROM finding_consolidations WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"finding_report_rewrites", `SELECT j.* FROM finding_report_rewrites j JOIN findings f ON f.id=j.finding_id WHERE f.task_id=$1 ORDER BY j.id`, []any{taskID}},

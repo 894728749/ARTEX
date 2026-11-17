@@ -288,6 +288,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 	var client *reamcp.Client
 	var catalog []reamcp.Tool
 	sessions := &reverseSessionManager{ctx: ctx, pg: pg, task: task, info: info, workDir: workDir, sessions: map[string]*reverseSession{}}
+	native := &nativeSessionManager{ctx: ctx, pg: pg, task: task, info: info, dir: workDir, sessions: map[string]*nativeSession{}}
 	connect := func(callCtx context.Context) (*reamcp.Client, []reamcp.Tool, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -307,6 +308,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		return cl, ts, nil
 	}
 	cleanup := func() {
+		native.close()
 		sessions.close()
 		mu.Lock()
 		defer mu.Unlock()
@@ -385,6 +387,9 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 			for _, allowed := range policy.ProfileIDs {
 				if profile.ID == allowed {
 					capabilities := []string{"frida_observation"}
+					if profile.Engine == "docker-native" {
+						capabilities = []string{"native_session", "gdb_mi", "native_replay"}
+					}
 					if profile.Platform == "android" {
 						capabilities = append(capabilities, "persistent_frida_session", "android_ui_tree", "android_screenshot", "android_tap", "android_input", "android_swipe")
 					}
@@ -418,6 +423,10 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 			}
 		}
 		out["execution_limits"] = limits
+		nativeConfig, _ := pg.NativeConfig(task.ID)
+		out["native_config"] = nativeConfig
+		nativeCases, _ := pg.NativeCases(task.ID)
+		out["native_cases"] = nativeCases
 		if profileErr != nil {
 			out["runtime_profile_error"] = profileErr.Error()
 		}
@@ -507,6 +516,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 			name, args := reverseStaticArguments(family, staged)
 			return call(callCtx, name, args)
 		}))
+		tools = append(tools, nativeTools(pg, task, info, workDir, role, native)...)
 		tools = append(tools, reverseConclusionTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseDebugTool(pg, task, info, workDir))
 		tools = append(tools, sessions.tool(), reverseBrowserTool(pg, task, info, workDir))

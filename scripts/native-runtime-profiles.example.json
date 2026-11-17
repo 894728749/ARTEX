@@ -1,0 +1,20 @@
+[
+  {
+    "id": "native-x86_64-lab",
+    "name": "Linux x86-64 native lab",
+    "engine": "docker-native",
+    "platform": "linux",
+    "command": "python3",
+    "args": ["/absolute/path/to/artex/scripts/native_runtime.py"],
+    "settings": {
+      "image": "registry.example.invalid/artex/native-lab@sha256:REPLACE_WITH_BUILT_DIGEST",
+      "seccomp_profile": "deploy/native-lab/seccomp-debug.json",
+      "network": "none",
+      "read_only_root": true,
+      "max_duration_ms": 900000,
+      "max_stream_bytes": 16777216,
+      "max_io_bytes": 65536,
+      "enabled": false
+    }
+  }
+]

@@ -26,6 +26,7 @@ web/next-env.d.ts
 
 # docs
 /docs/*
+!/docs/native-linux-workflow.md
 !/docs/team-onboarding.md
 !/docs/team-onboarding-validation.md
 !/docs/team-member-detail-validation.md

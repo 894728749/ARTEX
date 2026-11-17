@@ -53,9 +53,9 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 			roles = []string{"reverse_main", "reverse_goals", "reverse_planner", "reverse_static", "reverse_dynamic", "reverse_reviewer"}
 		case "reverse_submit_conclusion":
 			roles = []string{"reverse_static", "reverse_dynamic"}
-		case "reverse_review_conclusion":
+		case "reverse_review_conclusion", "native_review", "native_publish_finding":
 			roles = []string{"reverse_reviewer"}
-		case "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
+		case "native_session", "native_case", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 			roles = []string{"reverse_dynamic", "reverse_reviewer"}
 		case "reverse_get_conclusion", "reverse_read_evidence", "reverse_read_derived", "reverse_inspect_hermes":
 			roles = []string{"reverse_main", "reverse_goals", "reverse_planner", "reverse_static", "reverse_dynamic", "reverse_reviewer"}
@@ -123,9 +123,9 @@ func permittedReverseRoleTool(key, name string) bool {
 	switch name {
 	case "reverse_submit_conclusion":
 		return key == "reverse_static" || key == "reverse_dynamic"
-	case "reverse_review_conclusion":
+	case "reverse_review_conclusion", "native_review", "native_publish_finding":
 		return key == "reverse_reviewer"
-	case "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
+	case "native_session", "native_case", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 		return key == "reverse_dynamic" || key == "reverse_reviewer"
 	case "reverse_prepare_apk":
 		return key == "reverse_static" || key == "reverse_dynamic"

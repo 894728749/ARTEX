@@ -12,7 +12,7 @@ func TestReverseArtifactAndConclusionOwnership(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	suffix := fmt.Sprintf("reverse-contract-%d", testID())
 	first, err := d.CreateTaskWithOptions(suffix, "inspect sample", TaskCreateOptions{Kind: "reverse"})
 	if err != nil {
@@ -23,9 +23,15 @@ func TestReverseArtifactAndConclusionOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = d.Exec(`DELETE FROM task_archives WHERE task_id IN ($1,$2)`, first.ID, second.ID)
-		_ = d.DeleteTask(first.ID)
-		_ = d.DeleteTask(second.ID)
+		if _, err := d.Exec(`DELETE FROM task_archives WHERE task_id IN ($1,$2)`, first.ID, second.ID); err != nil {
+			t.Errorf("cleanup archives: %v", err)
+		}
+		if err := d.DeleteTask(first.ID); err != nil {
+			t.Errorf("cleanup first task: %v", err)
+		}
+		if err := d.DeleteTask(second.ID); err != nil {
+			t.Errorf("cleanup second task: %v", err)
+		}
 	})
 	a, err := d.AddReverseArtifact(first.ID, ReverseArtifact{Name: "sample.bin", Format: "bin", SizeBytes: 3, SHA256: "abc", Path: "/private/sample"})
 	if err != nil {
@@ -64,7 +70,7 @@ func TestReverseArchivePreservesIdentityAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { _ = d.Close() })
 	if err := d.EnsureLLMRecordsTable(); err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +82,12 @@ func TestReverseArchivePreservesIdentityAndEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = d.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID)
-		_ = d.DeleteTask(task.ID)
+		if _, err := d.Exec(`DELETE FROM task_archives WHERE task_id=$1`, task.ID); err != nil {
+			t.Errorf("cleanup archive: %v", err)
+		}
+		if err := d.DeleteTask(task.ID); err != nil {
+			t.Errorf("cleanup task: %v", err)
+		}
 	})
 	if !task.Paused || task.CoverageEnabled || task.WorkflowVersion != 1 {
 		t.Fatalf("draft identity: %+v", task)
@@ -102,9 +112,7 @@ func TestReverseArchivePreservesIdentityAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ClaimTaskArchiveJob(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	claimTaskArchiveFixture(t, d, archive.ID)
 	snapshot, err := d.SnapshotTaskArchive(task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -119,9 +127,7 @@ func TestReverseArchivePreservesIdentityAndEvidence(t *testing.T) {
 	if _, err := d.QueueTaskArchiveRestore(archive.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ClaimTaskArchiveJob(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	claimTaskArchiveFixture(t, d, archive.ID)
 	if _, err := d.RestoreTaskArchive(archive.ID, snapshot, 0); err != nil {
 		t.Fatal(err)
 	}

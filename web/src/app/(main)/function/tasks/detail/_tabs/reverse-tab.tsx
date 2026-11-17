@@ -5,6 +5,7 @@ import * as React from "react";
 import { DownloadIcon, FileUpIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { ReverseNativePanel } from "@/components/reverse-native-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -340,6 +341,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
           ))}
         </CardContent>
       </Card>
+      <ReverseNativePanel taskId={taskId} artifacts={artifacts} readOnly={readOnly} editable={paused && !readOnly} />
       <div className="grid gap-4 lg:grid-cols-2">
         {!readOnly && <Card>
           <CardHeader>

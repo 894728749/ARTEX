@@ -9,6 +9,7 @@ import (
 )
 
 type ReverseRuntimePolicy struct {
+	Revision      int64    `json:"revision"`
 	Enabled       bool     `json:"enabled"`
 	ProfileIDs    []string `json:"profile_ids"`
 	ArtifactIDs   []int64  `json:"artifact_ids"`
@@ -34,7 +35,7 @@ func (d *DB) ReverseRuntimePolicy(taskID int64) (ReverseRuntimePolicy, error) {
 		return p, err
 	}
 	var profiles, artifacts []byte
-	err := d.QueryRow(`SELECT enabled,profile_ids,artifact_ids,max_duration_ms FROM reverse_runtime_policies WHERE task_id=$1`, taskID).Scan(&p.Enabled, &profiles, &artifacts, &p.MaxDurationMS)
+	err := d.QueryRow(`SELECT enabled,profile_ids,artifact_ids,max_duration_ms,revision FROM reverse_runtime_policies WHERE task_id=$1`, taskID).Scan(&p.Enabled, &profiles, &artifacts, &p.MaxDurationMS, &p.Revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, nil
 	}
@@ -80,7 +81,7 @@ func (d *DB) SetReverseRuntimePolicy(ctx context.Context, taskID int64, p Revers
 	}
 	profiles, _ := json.Marshal(p.ProfileIDs)
 	artifacts, _ := json.Marshal(p.ArtifactIDs)
-	_, err = tx.ExecContext(ctx, `INSERT INTO reverse_runtime_policies(task_id,enabled,profile_ids,artifact_ids,max_duration_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(task_id) DO UPDATE SET enabled=EXCLUDED.enabled,profile_ids=EXCLUDED.profile_ids,artifact_ids=EXCLUDED.artifact_ids,max_duration_ms=EXCLUDED.max_duration_ms,updated_at=now()`, taskID, p.Enabled, profiles, artifacts, p.MaxDurationMS)
+	_, err = tx.ExecContext(ctx, `INSERT INTO reverse_runtime_policies(task_id,enabled,profile_ids,artifact_ids,max_duration_ms) VALUES($1,$2,$3,$4,$5) ON CONFLICT(task_id) DO UPDATE SET enabled=EXCLUDED.enabled,profile_ids=EXCLUDED.profile_ids,artifact_ids=EXCLUDED.artifact_ids,max_duration_ms=EXCLUDED.max_duration_ms,revision=reverse_runtime_policies.revision+1,updated_at=now()`, taskID, p.Enabled, profiles, artifacts, p.MaxDurationMS)
 	if err != nil {
 		return err
 	}
@@ -88,16 +89,38 @@ func (d *DB) SetReverseRuntimePolicy(ctx context.Context, taskID int64, p Revers
 }
 
 func (d *DB) BeginReverseRuntimeRun(ctx context.Context, taskID, artifactID, intentID int64, profile string, duration int) (int64, error) {
+	return d.beginReverseRuntimeRun(ctx, taskID, artifactID, intentID, profile, duration, nil, 0)
+}
+
+func (d *DB) BeginNativeRuntimeRun(ctx context.Context, taskID, artifactID, intentID int64, profile string, duration int, attachments []int64, revision int64) (int64, error) {
+	if revision < 1 {
+		return 0, errors.New("native execution requires current policy revision")
+	}
+	return d.beginReverseRuntimeRun(ctx, taskID, artifactID, intentID, profile, duration, attachments, revision)
+}
+
+func (d *DB) beginReverseRuntimeRun(ctx context.Context, taskID, artifactID, intentID int64, profile string, duration int, attachments []int64, revision int64) (int64, error) {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 	var max int
+	var actualRevision int64
 	var enabled, profileOK, artifactOK bool
-	err = tx.QueryRowContext(ctx, `SELECT enabled,profile_ids ? $2,artifact_ids @> jsonb_build_array($3::bigint),max_duration_ms FROM reverse_runtime_policies WHERE task_id=$1 FOR SHARE`, taskID, profile, artifactID).Scan(&enabled, &profileOK, &artifactOK, &max)
+	err = tx.QueryRowContext(ctx, `SELECT enabled,profile_ids ? $2,artifact_ids @> jsonb_build_array($3::bigint),max_duration_ms,revision FROM reverse_runtime_policies WHERE task_id=$1 FOR SHARE`, taskID, profile, artifactID).Scan(&enabled, &profileOK, &artifactOK, &max, &actualRevision)
 	if err != nil || !enabled || !profileOK || !artifactOK || duration < 100 || duration > max {
 		return 0, errors.New("未授权该运行环境、材料或观察时长；请在分析档案配置")
+	}
+	if revision > 0 && revision != actualRevision {
+		return 0, errors.New("native runtime policy revision changed")
+	}
+	for _, id := range attachments {
+		var allowed bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM reverse_runtime_policies p JOIN reverse_artifacts a ON a.task_id=p.task_id WHERE p.task_id=$1 AND a.id=$2 AND p.artifact_ids @> jsonb_build_array($2::bigint))`, taskID, id).Scan(&allowed)
+		if err != nil || !allowed {
+			return 0, errors.New("attachment is outside current task execution grant")
+		}
 	}
 	var owner int64
 	err = tx.QueryRowContext(ctx, `SELECT task_id FROM reverse_artifacts WHERE id=$1`, artifactID).Scan(&owner)

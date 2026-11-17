@@ -100,6 +100,15 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM reverse_native_runs WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM reverse_native_cases WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM reverse_native_configs WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	for _, statement := range []struct {
 		query string
 		args  []any
@@ -196,6 +205,9 @@ func (d *DB) restoreTaskArchive(
 	if streamedLLMRecords != "" && llmRecords == nil {
 		return nil, fmt.Errorf("%w: streamed LLM records are missing", ErrTaskArchiveFormatMismatch)
 	}
+	if err := validateNativeArchiveScope(snapshot); err != nil {
+		return nil, fmt.Errorf("restore native scope: %w", err)
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -267,7 +279,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
-	for _, table := range []string{"reverse_artifacts", "reverse_conclusions", "reverse_runtime_policies", "reverse_runtime_runs"} {
+	for _, table := range []string{"reverse_artifacts", "reverse_conclusions", "reverse_runtime_policies", "reverse_runtime_runs", "reverse_native_configs", "reverse_native_cases", "reverse_native_runs"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -277,6 +289,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, err
 	}
 	if _, err := tx.Exec(`UPDATE reverse_runtime_runs SET status='failed',last_error='归档恢复；原运行环境未接续',finished_at=now() WHERE task_id=$1 AND status='running'`, taskID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE reverse_native_runs SET target_state='failed',observation=COALESCE(observation,'{}'::jsonb)||'{"archive_recovery":"原运行环境未接续"}'::jsonb WHERE task_id=$1 AND target_state IN ('starting','running','stopped')`, taskID); err != nil {
 		return nil, err
 	}
 	if warning, err := restoreTaskRelations(tx, taskID, remappedTables["task_relations"]); err != nil {
@@ -303,6 +318,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
+	}
+	if err := insertArchiveRows(tx, "finding_native_evidence", remappedTables["finding_native_evidence"]); err != nil {
+		return nil, fmt.Errorf("restore finding native evidence: %w", err)
 	}
 	if err := restoreTaskTeamHistory(tx, taskID, snapshot.Tables["team_history_sources"]); err != nil {
 		return nil, fmt.Errorf("restore team history: %w", err)
@@ -456,6 +474,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"finding_relations": true, "finding_consolidations": true, "finding_report_rewrites": true,
 		"reverse_artifacts": true, "reverse_conclusions": true,
 		"reverse_runtime_policies": true, "reverse_runtime_runs": true,
+		"reverse_native_configs": true, "reverse_native_cases": true, "reverse_native_runs": true,
+		"finding_native_evidence": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)

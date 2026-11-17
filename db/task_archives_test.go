@@ -216,9 +216,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := d.ClaimTaskArchiveJob(t.Context())
-	if err != nil || claimed == nil || claimed.ID != archive.ID || claimed.State != Archiving {
-		t.Fatalf("claim = %+v, %v", claimed, err)
+	claimed := claimTaskArchiveFixture(t, d, archive.ID)
+	if claimed == nil || claimed.ID != archive.ID || claimed.State != Archiving {
+		t.Fatalf("claim = %+v", claimed)
 	}
 	var llmRecords bytes.Buffer
 	snapshot, err := d.SnapshotTaskArchiveWithLLMRecords(task.ID, &llmRecords)
@@ -274,9 +274,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if _, err := d.QueueTaskArchiveRestore(archive.ID); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = d.ClaimTaskArchiveJob(t.Context())
-	if err != nil || claimed == nil || claimed.State != Restoring {
-		t.Fatalf("restore claim = %+v, %v", claimed, err)
+	claimed = claimTaskArchiveFixture(t, d, archive.ID)
+	if claimed == nil || claimed.State != Restoring {
+		t.Fatalf("restore claim = %+v", claimed)
 	}
 	warnings, err := d.RestoreTaskArchiveWithLLMRecords(
 		archive.ID, snapshot, int64((10 * time.Minute).Seconds()), bytes.NewReader(llmRecords.Bytes()),
@@ -488,4 +488,42 @@ func assertArchiveGlobalStats(t *testing.T, d *DB, profileName, skillName, toolN
 	if !foundClass {
 		t.Fatalf("archive finding class %q missing", vulnclass)
 	}
+}
+
+// claimTaskArchiveFixture exercises the real SKIP LOCKED queue claimant while
+// keeping unrelated jobs in a reusable test database untouched. Round-trip
+// tests own one job, not the globally oldest queue entry. Locks are released
+// before the caller performs its archive/restore transaction.
+func claimTaskArchiveFixture(t *testing.T, d *DB, archiveID int64) *TaskArchive {
+	t.Helper()
+	tx, err := d.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(t.Context(), `SELECT id FROM task_archives
+ WHERE id<>$1 AND state IN ('archive_queued','restore_queued','delete_queued')
+ ORDER BY requested_at,id FOR UPDATE`, archiveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := d.ClaimTaskArchiveJob(t.Context())
+	if err != nil || claimed == nil || claimed.ID != archiveID {
+		t.Fatalf("fixture claim id=%d: got %+v, err=%v", archiveID, claimed, err)
+	}
+	return claimed
 }

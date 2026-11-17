@@ -1,0 +1,42 @@
+{
+  "base_image": "public.ecr.aws/docker/library/debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc",
+  "packages": {
+    "gdb": "13.1-3",
+    "binutils": "2.40-2",
+    "gcc": "4:12.2.0-3",
+    "libc6": "2.36-9+deb12u14",
+    "python3": "3.11.2-1+b1",
+    "ptrace_probe": "deploy/native-lab/ptrace_probe.c",
+    "libc6-dev": "2.36-9+deb12u14"
+  },
+  "image_digest": null,
+  "note": "Local image ID is immutable locally but is not an OCI registry manifest digest. No image was pushed. Offline build used the same approved direct package pins plus SHA256-verified Debian official packages; full transitive versions are in installed-toolchain.txt.",
+  "status": "candidate_build_and_scoped_runtime_acceptance_verified",
+  "changes": {
+    "libc6": "2.36-9+deb12u13 -> 2.36-9+deb12u14 (old pin absent from official bookworm lists)",
+    "libc6-dev": "added same-version development headers for ptrace probe compilation"
+  },
+  "local_image_id": "sha256:3d6f2e5ae0ab60a4c4cfcd8d49f5d65976327471222f696b259c05eca04c1963",
+  "local_image_tag": "artex-native-lab:bookworm-patched-review",
+  "build": {
+    "dockerfile": "Dockerfile.offline",
+    "network": "none",
+    "package_downloads": false,
+    "package_count": 78,
+    "package_bytes": 79827056,
+    "package_source": "https://deb.debian.org/debian/ and https://deb.debian.org/debian-security/",
+    "verification": "SHA256 and size from apt-verified official Packages indexes",
+    "base_provenance": "Docker Official Images on Amazon ECR Public",
+    "built_utc": "2026-11-17T10:31:23.686325+00:00"
+  },
+  "runtime_acceptance": {
+    "python_unit_tests": 79,
+    "real_docker_tests": 22,
+    "real_docker_failed": 0,
+    "real_docker_skipped": 0,
+    "fixture_compiler": "container gcc",
+    "go_python_docker_gdb_pg_chain_repeats": 2,
+    "chain_failed": 0,
+    "scope": "synthetic local fixtures only; not deployed; start stop-at-main semantics unchanged"
+  }
+}

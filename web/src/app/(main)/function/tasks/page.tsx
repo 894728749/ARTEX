@@ -123,7 +123,6 @@ import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   AssetInterceptRuleInput,
-  ChatAttachment,
   Company,
   DeleteTaskOptions,
   DeleteTaskResult,
@@ -147,17 +146,7 @@ function fmtBytes(n: number): string {
 // description, so re-uploads append under the same block instead of adding a new header.
 const UPLOAD_MARKER = "【上传文件（绝对路径）】";
 
-// appendUploads folds newly-uploaded files' ABSOLUTE paths into the description as a
-// Read/Bash-friendly manifest — the worker opens them by path. Keeps one marked block:
-// first upload adds the header, later uploads append bullets under it.
-function appendUploads(desc: string, atts: ChatAttachment[]): string {
-  const bullets = atts.map((a) => `- ${a.abs ?? a.path}（${fmtBytes(a.size)}）`).join("\n");
-  if (desc.includes(UPLOAD_MARKER)) {
-    return `${desc.replace(/\s*$/, "")}\n${bullets}\n`;
-  }
-  const head = desc.trim() ? `${desc.replace(/\s*$/, "")}\n\n` : "";
-  return `${head}${UPLOAD_MARKER} worker 可用 Read/Bash 按路径打开：\n${bullets}\n`;
-}
+
 
 // POLL_MS is the task-list refresh interval. Task state moves on the server (planner /
 // worker), so the list has to be pulled; 10s is plenty for status / 进度 / token 变化.
@@ -3081,7 +3070,6 @@ function CreateTaskSheet({
   onCategoriesChanged: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
-  const [taskKind, setTaskKind] = React.useState<"pentest" | "reverse">("pentest");
   const [name, setName] = React.useState("");
   const [categoryID, setCategoryID] = React.useState<number | undefined>(undefined);
   const [description, setDescription] = React.useState("");
@@ -3098,10 +3086,10 @@ function CreateTaskSheet({
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
-  // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
-  const [uploading, setUploading] = React.useState(false);
+  // Material bytes are uploaded after the routing decision.
+  const uploading = creating;
   const [uploadCount, setUploadCount] = React.useState(0);
-  const draftIdRef = React.useRef<string>("");
+  const [selectedFiles, setSelectedFiles] = React.useState<File[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const sheetContentRef = React.useRef<HTMLDivElement>(null);
 
@@ -3117,26 +3105,12 @@ function CreateTaskSheet({
       .catch(() => setCompanies([]));
   }, []);
 
-  // pickFiles uploads the chosen files into this draft's staging dir and appends their
-  // absolute paths to the description; the task's agents open them by path via Read/Bash.
-  async function pickFiles(files: FileList | null) {
+  // Keep materials in memory until a workflow has been selected.
+  function pickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
-    // crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
-    if (!draftIdRef.current) {
-      draftIdRef.current =
-        globalThis.crypto?.randomUUID?.() ?? `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    }
-    setUploading(true);
-    try {
-      const r = await api.chatUpload("staging", draftIdRef.current, Array.from(files));
-      setDescription((prev) => appendUploads(prev, r.attachments));
-      setUploadCount((n) => n + r.attachments.length);
-    } catch (e) {
-      toast.error("上传失败：" + (e as Error).message);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = ""; // allow re-picking the same file
-    }
+    setSelectedFiles((previous) => [...previous, ...Array.from(files)]);
+    setUploadCount((count) => count + files.length);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function createTask() {
@@ -3152,26 +3126,51 @@ function CreateTaskSheet({
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
-      await api.createTask({
-        kind: taskKind,
+      const created = await api.createTask({
+        kind: "auto",
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
         goal: goal.trim(),
+        materialHints: selectedFiles.map((f) => ({ name: f.name, size: f.size })),
         llmProfileIds: llmProfileIDs.map(Number),
-        sourceTaskIds: taskKind === "pentest" ? sourceTaskIDs : [],
-        companyIds: taskKind === "pentest" ? companyIDs : [],
+        sourceTaskIds: sourceTaskIDs,
+        companyIds: companyIDs,
         timeoutSeconds: timeoutSec,
-        seedFirstIntent: taskKind === "pentest" && seedFirstIntent,
+        seedFirstIntent: seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
-        coverageEnabled: taskKind === "pentest" && coverageEnabled,
-        interceptRules: taskKind === "pentest" ? interceptRules
+        coverageEnabled: coverageEnabled,
+        interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
-          .filter((r) => r.pattern !== "") : [],
+          .filter((r) => r.pattern !== ""),
       });
-      toast.success("任务已创建");
+      let artifactUploadError = "";
+      if (created.route?.primary_kind === "reverse") {
+        for (const file of selectedFiles) {
+          try {
+            await api.uploadReverseArtifact(created.task.id, file, "user-provided", "");
+          } catch (e) {
+            artifactUploadError = (e as Error).message;
+            break;
+          }
+        }
+      }
+      if (created.task.kind !== "reverse" && selectedFiles.length) {
+        try {
+          await api.chatUpload("task", created.task.id, selectedFiles);
+          await api.controlTask(created.task.id, "resume");
+        } catch (e) {
+          artifactUploadError = (e as Error).message;
+        }
+      }
+      if (artifactUploadError) toast.error(`任务 #${created.task.id} 已创建，但材料上传失败：${artifactUploadError}`);
+      else
+        toast.success(
+          created.route
+            ? `已由 AI 判定为${created.route.primary_kind === "reverse" ? "逆向分析" : "渗透测试"}：${created.route.reason}${created.route.needs_materials.length ? `；待补材料：${created.route.needs_materials.join("、")}` : ""}`
+            : "任务已创建",
+        );
       setName("");
-      setTaskKind("pentest");
       setCategoryID(undefined);
       setDescription("");
       setGoal("");
@@ -3185,7 +3184,7 @@ function CreateTaskSheet({
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
-      draftIdRef.current = "";
+      setSelectedFiles([]);
       setOpen(false);
       onCreated();
     } catch (e) {
@@ -3211,40 +3210,38 @@ function CreateTaskSheet({
       >
         <SheetHeader className="border-b p-6">
           <SheetTitle>新建任务</SheetTitle>
-          <SheetDescription>选择任务类型，描述对象与需要回答的问题。</SheetDescription>
+          <SheetDescription>描述对象与需要回答的问题，AI 会结合所选材料判断合适的工作流。</SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid gap-5">
             <Field>
-              <FieldLabel htmlFor="task-kind">任务类型</FieldLabel>
-              <Select value={taskKind} onValueChange={(value) => setTaskKind(value as "pentest" | "reverse")}>
-                <SelectTrigger id="task-kind"><SelectValue /></SelectTrigger>
-                <SelectContent><SelectItem value="pentest">渗透测试</SelectItem><SelectItem value="reverse">逆向分析</SelectItem></SelectContent>
-              </Select>
-              <FieldDescription>{taskKind === "reverse" ? "创建后上传分析材料，再启动分析；当前自动分析支持 JavaScript。" : "围绕指定目标规划测试，验证安全假设并整理证据。"}</FieldDescription>
+              <FieldLabel>任务类型</FieldLabel>
+              <FieldDescription>
+                由 AI 根据描述、目标和材料文件名及大小判断；材料正文不会用于分类。混合任务之后仍可请求其他工作流协助。
+              </FieldDescription>
             </Field>
-            {taskKind === "pentest" && <TaskTemplateControls
-              description={description}
-              goal={goal}
-              categoryID={categoryID}
-              interceptRules={interceptRules}
-              selectedTemplateID={selectedTemplateID}
-              onSelectedTemplateIDChange={setSelectedTemplateID}
-              onApply={(template) => {
-                setDescription(template.description);
-                setGoal(template.goal);
-                setCategoryID(template.category_id ?? undefined);
-                setInterceptRules(template.intercept_rules ?? []);
-                setUploadCount(0);
-              }}
-              portalContainer={sheetContentRef}
-            />}
+            <TaskTemplateControls
+                description={description}
+                goal={goal}
+                categoryID={categoryID}
+                interceptRules={interceptRules}
+                selectedTemplateID={selectedTemplateID}
+                onSelectedTemplateIDChange={setSelectedTemplateID}
+                onApply={(template) => {
+                  setDescription(template.description);
+                  setGoal(template.goal);
+                  setCategoryID(template.category_id ?? undefined);
+                  setInterceptRules(template.intercept_rules ?? []);
+                  setUploadCount(0);
+                }}
+                portalContainer={sheetContentRef}
+              />
             <div className="grid gap-2">
               <Label htmlFor="name">名称（可选）</Label>
               <Input
                 id="name"
-                placeholder="给任务起个便于识别的名字，例如：Acme 官网渗透"
+                placeholder="给任务起个便于识别的名字，例如：协议验证或样本分析"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
@@ -3265,12 +3262,12 @@ function CreateTaskSheet({
               <Textarea
                 id="description"
                 className="min-h-32"
-                placeholder={taskKind === "reverse" ? "样本来源、目标平台/架构与已知背景" : "测试对象与背景，例如：测试 example.com 这个站点"}
+                placeholder={"对象、材料来源、环境与已知背景"}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
               {/* 渗透任务沿用草稿上传；逆向材料在任务创建后进入分析档案，不向描述写入本机路径。 */}
-              {taskKind === "pentest" && <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3290,54 +3287,54 @@ function CreateTaskSheet({
                 </Button>
                 <span className="text-muted-foreground text-xs">
                   {uploadCount > 0
-                    ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
-                    : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
+                    ? `已选择 ${uploadCount} 个文件，创建任务后保存材料`
+                    : "可多选；AI 使用文件名和大小判断工作方向，文件内容保留为分析材料"}
                 </span>
-              </div>}
+              </div>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="goal">目标</Label>
               <Textarea
                 id="goal"
                 className="min-h-32"
-                placeholder={taskKind === "reverse" ? "分析目标，例如：梳理初始化流程、关键函数与可验证行为" : "要达成什么，例如：拿下后台管理权限、获取服务器权限"}
+                placeholder={"需要回答的问题、交付结果与验证标准"}
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
               />
             </div>
-            {taskKind === "pentest" && <Field>
-              <FieldLabel htmlFor="source-tasks">关联任务</FieldLabel>
-              <SourceTaskPicker
-                tasks={tasks}
-                value={sourceTaskIDs}
-                onValueChange={setSourceTaskIDs}
-                portalContainer={sheetContentRef}
-              />
-              <FieldDescription>
-                最多关联 {MAX_SOURCE_TASKS}{" "}
-                个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
-              </FieldDescription>
-            </Field>}
-            {taskKind === "pentest" && <Field>
-              <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
-              <CompanyPicker
-                companies={companies}
-                value={companyIDs}
-                onValueChange={setCompanyIDs}
-                portalContainer={sheetContentRef}
-              />
-              <FieldDescription>
-                创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
-                作为范围上下文；不会自动生成意图或强制改变执行目标。
-              </FieldDescription>
-            </Field>}
-            {taskKind === "pentest" && <Field>
-              <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
-              <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
-              <FieldDescription>
-                仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
-              </FieldDescription>
-            </Field>}
+            <Field>
+                <FieldLabel htmlFor="source-tasks">关联任务</FieldLabel>
+                <SourceTaskPicker
+                  tasks={tasks}
+                  value={sourceTaskIDs}
+                  onValueChange={setSourceTaskIDs}
+                  portalContainer={sheetContentRef}
+                />
+                <FieldDescription>
+                  最多关联 {MAX_SOURCE_TASKS}{" "}
+                  个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
+                </FieldDescription>
+              </Field>
+            <Field>
+                <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
+                <CompanyPicker
+                  companies={companies}
+                  value={companyIDs}
+                  onValueChange={setCompanyIDs}
+                  portalContainer={sheetContentRef}
+                />
+                <FieldDescription>
+                  创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
+                  作为范围上下文；不会自动生成意图或强制改变执行目标。
+                </FieldDescription>
+              </Field>
+            <Field>
+                <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
+                <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
+                <FieldDescription>
+                  仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
+                </FieldDescription>
+              </Field>
             <Field>
               <FieldLabel htmlFor="llm-profiles">LLM 配置链</FieldLabel>
               <TaskLLMProfileChain
@@ -3355,7 +3352,7 @@ function CreateTaskSheet({
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
                 <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
                 高级设置
-                <span className="text-muted-foreground ml-auto text-xs font-normal">{taskKind === "reverse" ? "超时 · 心跳" : "超时 · 心跳 · 首个意图"}</span>
+                <span className="text-muted-foreground ml-auto text-xs font-normal">{"超时 · 心跳 · 首个意图"}</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
                 <div className="grid gap-2">
@@ -3389,34 +3386,34 @@ function CreateTaskSheet({
                     worker）。下限 10 分钟。
                   </p>
                 </div>
-                {taskKind === "pentest" && <div className="grid gap-2">
-                  <label htmlFor="seed-first-intent" className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      id="seed-first-intent"
-                      checked={seedFirstIntent}
-                      onCheckedChange={(v) => setSeedFirstIntent(!!v)}
-                    />
-                    直接下发首个意图（描述+目标）
-                  </label>
-                  <p className="text-muted-foreground text-xs">
-                    开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
-                    接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
-                  </p>
-                </div>}
-                {taskKind === "pentest" && <div className="grid gap-2">
-                  <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      id="coverage-enabled"
-                      checked={coverageEnabled}
-                      onCheckedChange={(v) => setCoverageEnabled(!!v)}
-                    />
-                    资产覆盖度功能
-                  </label>
-                  <p className="text-muted-foreground text-xs">
-                    默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
-                    态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
-                  </p>
-                </div>}
+                <div className="grid gap-2">
+                    <label htmlFor="seed-first-intent" className="flex items-center gap-2 text-sm">
+                      <Checkbox
+                        id="seed-first-intent"
+                        checked={seedFirstIntent}
+                        onCheckedChange={(v) => setSeedFirstIntent(!!v)}
+                      />
+                      直接下发首个意图（描述+目标）
+                    </label>
+                    <p className="text-muted-foreground text-xs">
+                      开启后创建即把「描述+目标」作为一条意图下发，worker 免等首轮规划直接开跑，跑完再由 planner
+                      接手判定/补充。CTF 等常一个 work 直接解决的场景推荐开启；关闭则走标准的先规划再执行。
+                    </p>
+                  </div>
+                <div className="grid gap-2">
+                    <label htmlFor="coverage-enabled" className="flex items-center gap-2 text-sm">
+                      <Checkbox
+                        id="coverage-enabled"
+                        checked={coverageEnabled}
+                        onCheckedChange={(v) => setCoverageEnabled(!!v)}
+                      />
+                      资产覆盖度功能
+                    </label>
+                    <p className="text-muted-foreground text-xs">
+                      默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
+                      态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
+                    </p>
+                  </div>
               </CollapsibleContent>
             </Collapsible>
           </div>

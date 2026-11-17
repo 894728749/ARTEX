@@ -189,7 +189,11 @@ package_binary() {
   cp examples/README.md "$package_root/examples/"
   cp docs/team-onboarding.md docs/team-onboarding-validation.md docs/team-branches.md docs/team-shared-messages.md docs/team-auto-collaboration.md "$package_root/docs/"
   mkdir -p "$package_root/scripts"
-  cp scripts/reverse_runtime.py scripts/reverse-runtime-profiles.example.json "$package_root/scripts/"
+  cp scripts/reverse_runtime.py scripts/native_runtime.py scripts/reverse-runtime-profiles.example.json scripts/native-runtime-profiles.example.json "$package_root/scripts/"
+  mkdir -p "$package_root/scripts/native_runner" "$package_root/deploy/native-lab"
+  cp scripts/native_runner/*.py "$package_root/scripts/native_runner/"
+  cp deploy/native-lab/* "$package_root/deploy/native-lab/"
+  cp docs/native-linux-workflow.md "$package_root/docs/"
   cp docs/reverse-interactive-workflow.md "$package_root/docs/"
   # 守护启动脚本是正式入口：页面上的一键更新要靠它在进程退出后重新拉起，
   # 直接跑 artex 本体的话更新完就再也起不来了。按目标系统只带对应的那一份。
