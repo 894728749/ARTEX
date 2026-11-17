@@ -155,11 +155,35 @@ func nativeObservationError(o map[string]any, hash string) error {
 	}
 	return errors.New("native target outcome unavailable")
 }
-func nativeSaveEvidence(dir string, taskID int64, a *db.ReverseArtifact, operation string, o map[string]any, transcript any) (string, error) {
-	record := map[string]any{"structuredContent": map[string]any{"operation": operation, "provider": map[string]any{"name": "docker-native", "version": 1}, "subject": map[string]any{"digest": map[string]any{"sha256": a.SHA256}, "name": a.Name}, "normalized_result": o, "transcript": transcript, "authority": "controlled-replay"}}
+
+// Legacy native sessions accept a stream capped at 3 MiB, so their evidence
+// envelope must stay larger than that while remaining explicitly bounded.
+// Fuzz campaigns keep a separate, tighter cap (maxFuzzEvidenceFile).
+const maxNativeEvidenceBytes = 4 << 20
+
+func nativeEvidenceLimit(operation string) int {
+	if operation == "native_fuzz" {
+		return maxFuzzEvidenceFile
+	}
+	return maxNativeEvidenceBytes
+}
+
+// Authority is explicit: an AFL campaign is only a candidate source, while a
+// controlled replay is the evidence accepted by the independent reviewer.
+func nativeSaveEvidenceWithAuthority(dir string, taskID int64, a *db.ReverseArtifact, operation, authority string, o map[string]any, transcript any) (string, error) {
+	expectedAuthority := map[string]string{"native_inspect": "static-inspection",
+		"native_session": "controlled-replay", "native_fuzz": "candidate-only",
+		"native_replay": "controlled-replay"}[operation]
+	if expectedAuthority == "" || authority != expectedAuthority {
+		return "", errors.New("unsupported native operation/authority pair")
+	}
+	record := map[string]any{"structuredContent": map[string]any{"operation": operation, "provider": map[string]any{"name": "docker-native", "version": 1}, "subject": map[string]any{"digest": map[string]any{"sha256": a.SHA256}, "name": a.Name}, "normalized_result": o, "transcript": transcript, "authority": authority}}
 	raw, e := json.Marshal(record)
 	if e != nil {
 		return "", e
+	}
+	if len(raw) > nativeEvidenceLimit(operation) {
+		return "", errors.New("native evidence exceeds size limit")
 	}
 	prefix := filepath.Join("tasks", strconv.FormatInt(taskID, 10), "reverse", "results")
 	dest := filepath.Join(dir, prefix)
@@ -177,6 +201,20 @@ func nativeSaveEvidence(dir string, taskID int64, a *db.ReverseArtifact, operati
 		e = ce
 	}
 	return filepath.ToSlash(path), e
+}
+
+// Compatibility entry point for the existing native session caller. New code
+// must state its authority explicitly so fuzz campaigns cannot be mislabeled.
+func nativeSaveEvidence(dir string, taskID int64, a *db.ReverseArtifact, operation string, o map[string]any, transcript any) (string, error) {
+	authority := "controlled-replay"
+	switch operation {
+	case "native_session":
+	case "native_inspect":
+		authority = "static-inspection"
+	default:
+		return "", errors.New("unsupported native evidence operation")
+	}
+	return nativeSaveEvidenceWithAuthority(dir, taskID, a, operation, authority, o, transcript)
 }
 func (s *Server) reverseNativeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/findings/{id}/native-export", s.nativeExportRoute)
@@ -331,7 +369,7 @@ func nativeReplay(ctx context.Context, pg *db.DB, task *db.Task, info agent.RunI
 	o["case_sha256"] = c.SHA256
 	o["policy_revision"] = policy.Revision
 	o["replay_case"] = c
-	path, e = nativeSaveEvidence(dir, task.ID, a, "native_replay", o, nil)
+	path, e = nativeSaveEvidenceWithAuthority(dir, task.ID, a, "native_replay", "controlled-replay", o, nil)
 	if e != nil {
 		return nil, e
 	}
@@ -388,7 +426,7 @@ func nativeTools(pg *db.DB, task *db.Task, info agent.RunInfo, dir, role string,
 		if e != nil {
 			return actool.Errorf(e.Error()), nil
 		}
-		path, e := nativeSaveEvidence(dir, task.ID, artifact, "native_inspect", o, nil)
+		path, e := nativeSaveEvidenceWithAuthority(dir, task.ID, artifact, "native_inspect", "static-inspection", o, nil)
 		if e != nil {
 			return actool.Errorf(e.Error()), nil
 		}
@@ -396,6 +434,9 @@ func nativeTools(pg *db.DB, task *db.Task, info agent.RunInfo, dir, role string,
 	})}
 	if role != "reverse_dynamic" && role != "reverse_reviewer" && role != "worker" {
 		return tools
+	}
+	if role == "reverse_dynamic" {
+		tools = append(tools, nativeFuzzTool(pg, task, info, dir))
 	}
 	tools = append(tools, m.tool(), reverseTool("native_case", "create 保存不可变案例；replay 独立重放；repeat 返回 n/N；minimize 有界缩减同一目标输出断言并保留原输入。v2 支持已登记依赖/loader/Python harness、stdin/file 和目标输出断言，自动绑定当前样本哈希、镜像和策略版本。harness 输出不能作为目标影响证明。reviewer 只能 replay/repeat。", reverseObject(map[string]any{"action": reverseString(), "case_id": reverseInt(), "artifact_id": reverseInt(), "profile_id": reverseString(), "title": reverseString(), "argv": map[string]any{"type": "array", "items": reverseString()}, "input_base64": reverseString(), "expected_exit": reverseInt(), "expected_signal": reverseInt(), "replay_plan": nativeReplayPlanSchema(), "duration_ms": reverseInt(), "repeats": reverseInt(), "max_runs": reverseInt()}, "action"), func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 		var req struct {

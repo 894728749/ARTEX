@@ -429,12 +429,22 @@ class MIReader:
                 self._eof = True
                 self._ready.notify_all()
 
-    def drain(self, limit=512):
+    def drain_with_eof(self, limit=512):
+        """Atomically return a bounded batch and EOF after all buffered records.
+
+        Raw eof only means the producer has stopped. It must not be used to
+        declare debugger death until the queued terminal records are consumed.
+        A producer append after this snapshot leaves drained_eof false.
+        """
         with self._lock:
             count = min(limit, len(self._events))
             events = self._events[:count]
             del self._events[:count]
-            return events
+            return events, self._eof and not self._events
+
+    def drain(self, limit=512):
+        # Preserve existing callers that only need records.
+        return self.drain_with_eof(limit)[0]
 
     def wait(self, timeout):
         with self._ready:

@@ -1725,7 +1725,7 @@ CREATE TABLE IF NOT EXISTS reverse_native_runs (
  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
  artifact_id bigint NOT NULL REFERENCES reverse_artifacts(id) ON DELETE CASCADE,
  intent_id bigint NOT NULL DEFAULT 0, case_id bigint REFERENCES reverse_native_cases(id) ON DELETE SET NULL,
- config_revision bigint NOT NULL, mode text NOT NULL CHECK(mode IN ('exec','debug','replay')),
+ config_revision bigint NOT NULL, mode text NOT NULL CHECK(mode IN ('exec','debug','replay','fuzz')),
  target_state text NOT NULL DEFAULT 'starting', result_path text NOT NULL DEFAULT '', observation jsonb NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS finding_native_evidence (
@@ -1747,3 +1747,8 @@ ALTER TABLE reverse_native_cases ADD CONSTRAINT reverse_native_cases_assertion_c
   ((expected_exit IS NOT NULL)::int + (expected_signal IS NOT NULL)::int +
    (COALESCE(replay_plan->'assertion','null'::jsonb) <> 'null'::jsonb)::int) = 1
 );
+-- Existing installations have the original exec/debug/replay constraint. Drop
+-- and recreate it so fuzz campaigns can use the same immutable runtime ledger.
+ALTER TABLE reverse_native_runs DROP CONSTRAINT IF EXISTS reverse_native_runs_mode_check;
+ALTER TABLE reverse_native_runs ADD CONSTRAINT reverse_native_runs_mode_check
+  CHECK (mode IN ('exec','debug','replay','fuzz'));

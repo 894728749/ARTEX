@@ -55,6 +55,8 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 			roles = []string{"reverse_static", "reverse_dynamic"}
 		case "reverse_review_conclusion", "native_review", "native_publish_finding":
 			roles = []string{"reverse_reviewer"}
+		case "native_fuzz":
+			roles = []string{"reverse_dynamic"}
 		case "native_session", "native_case", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 			roles = []string{"reverse_dynamic", "reverse_reviewer"}
 		case "reverse_get_conclusion", "reverse_read_evidence", "reverse_read_derived", "reverse_inspect_hermes":
@@ -64,6 +66,10 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 		}
 		seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + t.Name(), Desc: t.Description(), Schema: t.InputSchema(), Agents: roles})
 	}
+	// The worker enumeration above intentionally lists the broad tool set; the
+	// fuzz action is only authorized for the dynamic role and is seeded here.
+	fuzz := nativeFuzzTool(pg, &db.Task{}, agent.RunInfo{}, dir)
+	seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + fuzz.Name(), Desc: fuzz.Description(), Schema: fuzz.InputSchema(), Agents: []string{"reverse_dynamic"}})
 	return seeds
 }
 
@@ -125,12 +131,19 @@ func permittedReverseRoleTool(key, name string) bool {
 		return key == "reverse_static" || key == "reverse_dynamic"
 	case "reverse_review_conclusion", "native_review", "native_publish_finding":
 		return key == "reverse_reviewer"
+	case "native_fuzz":
+		return key == "reverse_dynamic"
+	case "native_inspect":
+		return key == "reverse_static" || key == "reverse_dynamic" || key == "reverse_reviewer"
 	case "native_session", "native_case", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 		return key == "reverse_dynamic" || key == "reverse_reviewer"
 	case "reverse_prepare_apk":
 		return key == "reverse_static" || key == "reverse_dynamic"
 	case "reverse_inspect_hermes", "reverse_read_derived":
 		return key == "reverse_static" || key == "reverse_dynamic" || key == "reverse_reviewer"
+	}
+	if strings.HasPrefix(name, "native_") {
+		return false
 	}
 	return true
 }

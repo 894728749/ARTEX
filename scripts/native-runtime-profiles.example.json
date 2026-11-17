@@ -14,7 +14,8 @@
       "max_duration_ms": 900000,
       "max_stream_bytes": 16777216,
       "max_io_bytes": 65536,
-      "enabled": false
+      "enabled": false,
+      "fuzz_enabled": false
     }
   }
 ]

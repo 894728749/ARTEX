@@ -65,4 +65,6 @@ cd web && NEXT_EXPORT=1 npx next build --webpack
 
 真实容器验收覆盖二进制多步 I/O 与 EOF、非零退出、SIGSEGV、超时/清理、可变镜像拒绝，以及 GDB 信号停止后的寄存器/栈读取。Go 验证覆盖授权拒绝、会话协议、角色边界、重放断言、独立审核与幂等 Finding、归档恢复和证据保留。模型分类使用 mock provider 验证，没有借测试调用真实付费模型。
 
-第一版不包括 fuzzing、远程服务 tube、完整交互调试 TTY、自动 ROP/堆利用生成、全架构/内核分析或任意 libc 自动下载。也没有以合成 SIGSEGV 代替真实产品漏洞的复现证明。保留这些边界，后续功能在本次证据与授权接口上继续扩展。
+v0.7.0 增加默认关闭的 [AFL++ 最小闭环](native-fuzzing.md)：支持已插桩的 Linux x86-64 ELF、stdin/文件输入、有界 campaign、候选导入和独立重放。环境须另行准备并显式授权；普通 native 镜像不保证包含 AFL++。示例中的 `enabled` 和 `fuzz_enabled` 均默认 false。
+
+仍不包括远程服务 tube、完整交互调试 TTY、自动 ROP/堆利用生成、全架构/内核分析或任意 libc 自动下载。合成 SIGSEGV 和 AFL crash 均不代替真实产品漏洞证明。验收范围与跳过项见 [v0.7.0 原生功能验收](native-release-validation.md)。

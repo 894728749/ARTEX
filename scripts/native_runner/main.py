@@ -620,6 +620,9 @@ def serve(inp=sys.stdin, out=sys.stdout, sandbox=None):
         write_frame(out, frame)
 
     operation = first.get("operation")
+    if operation == "fuzz":
+        from .fuzz import serve_fuzz
+        return serve_fuzz(first, inp, emit)
     if operation == "doctor":
         emit({"request_id": first.get("request_id", "doctor"), "kind": "result",
               "observation": doctor(profile=first.get("profile"))})
@@ -915,14 +918,15 @@ class _SessionRuntime:
         deadline = time.monotonic() + max(0.0, timeout)
         required_tokens = (tokens["set_mi_async"], tokens["show_mi_async"])
         while time.monotonic() < deadline:
-            for record in self.mi.drain(limit=256):
+            records, drained_eof = self.mi.drain_with_eof(limit=256)
+            for record in records:
                 self.apply_record(record)
             if self.awaiting.get(tokens["set_mi_async"], {}).get("error"):
                 break
             if all(self.awaiting.get(token, {}).get("done")
                    for token in required_tokens):
                 break
-            if self.mi.eof:
+            if drained_eof:
                 break
             time.sleep(0.005)
         for record in self.mi.drain(limit=256):
@@ -1402,7 +1406,7 @@ def _serve_session(first, inp, sandbox, emit):
         while True:
             now = time.monotonic()
             if runtime.mi:
-                events = runtime.mi.drain(limit=256)
+                events, drained_eof = runtime.mi.drain_with_eof(limit=256)
                 for record in events:
                     if runtime.pending is not None:
                         raw_length = len(record.get("raw", ""))
@@ -1412,7 +1416,7 @@ def _serve_session(first, inp, sandbox, emit):
                         else:
                             runtime.pending["records_truncated"] = True
                     runtime.apply_record(record)
-                runtime.mi_eof = runtime.mi.eof
+                runtime.mi_eof = drained_eof
                 if runtime.mi.error and not errors:
                     errors.append("gdb MI reader failed: " + str(runtime.mi.error))
             if runtime.observation_tx and runtime.observation_done():

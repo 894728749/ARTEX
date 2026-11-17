@@ -1,8 +1,39 @@
 # 发布说明
 
-本文记录本仓库版本标签及开发期间的 `main` 更新，按版本演进倒序记录新增功能、修复、验证结果和兼容边界。最新版本为 **v0.6.0**；下方 `main` 条目保留本次发布前的开发和本机验收记录，其中“未发布”指各条记录当时的状态。`artex-*` 是历史源码里程碑，未发布独立二进制下载包，不参与在线更新。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 的实际资产为准。
+本文记录本仓库版本标签及开发期间的 `main` 更新，按版本演进倒序记录新增功能、修复、验证结果和兼容边界。最新版本为 **v0.7.0**；下方 `main` 条目保留本次发布前的开发和本机验收记录，其中“未发布”指各条记录当时的状态。`artex-*` 是历史源码里程碑，未发布独立二进制下载包，不参与在线更新。下载以 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases) 的实际资产为准。
 
 日期和时间均按北京时间（UTC+8）记录，区分源码快照、标签建立和 Release 发布时点。本文于 2026-11-10 补齐历史说明，保留原标签指向；下面的测试结果属于各版原验收记录，不表示本次重新运行了历史测试。上游 0.3.15 及更早的继承记录保留在 [CHANGELOG.md](CHANGELOG.md)，不代表本仓库另有对应正式 Release。研发过程中的“v2”是内部迭代名称，首个公开协作标签为 `artex-collaboration-v1`。
+
+<a id="v070"></a>
+
+## `v0.7.0`
+
+日期：2026-11-17。本版加入自动任务分流、Linux x86-64 原生分析与本地重放，以及默认关闭的 AFL++ 最小闭环；修复 GDB 正常退出与 EOF 并发时的误判。新建附注标签，原有版本标签不变。
+
+### 实现功能
+
+- **自动任务分流**：创建任务时可以不预选具体方向；`kind:auto` 由已配置模型按描述、目标和材料元数据判定主工作流及能力，实际任务种类仍兼容 `pentest` / `reverse`。分类失败明确报错；新逆向任务暂停等待材料和运行授权。分类不能替代执行授权。
+- **Linux x86-64 原生分析**：ELF 架构和保护信息、符号与依赖静态检查；Docker 隔离的二进制 stdin/stdout 多步会话；类型化 GDB/MI 的运行、断点、单步、继续、中断、寄存器、栈、内存、模块和有界 core 读取。GDB 队列和 EOF 采用原子快照，正常终止记录优先于连接关闭判断。
+- **案例、重放与独立复核**：不可变 NativeCase、NativeReplayPlan v1/v2、stdin/文件输入、任务内依赖/loader/Python harness；绑定样本和附件哈希、固定镜像、策略修订。支持 n/N 重复验证及限定目标输出断言的有界最小化。独立审核者重放后进入 Finding，支持证据快照、导出、归档和恢复；harness 输出不冒充目标影响。
+- **AFL++ 最小闭环**：`native_fuzz` 提供 `run`、`list`、`import_candidate`、`replay_candidate`，仅动态分析角色可调用。支持已插桩 ELF 的 stdin 或精确文件占位输入，单 worker 同步执行；按时间、执行数、内存、输出盘和候选数量限制运行，确认取消、超时与 owned 容器清理。结果保存为候选，显式独立重放后才能进入后续审核，不自动创建 Finding。
+- **兼容与证据修复**：数据库运行模式兼容扩展 `fuzz`，保留原 exec/debug/replay 记录；旧 `native_inspect` 角色权限保留；session 与 fuzz 证据大小上限分离，超限请求与响应生成一致的失败证据。修复工具探测阶段取消被误记为失败的问题。
+- **交付材料**：ZIP 包含 native runner、默认关闭的 profile 示例、实验环境材料及原生/Fuzzing/验收说明。已有模型凭据、配对和运行配置处理方式不变。
+
+### 验证结果
+
+- 最终隔离候选 16 文件哈希核对后合入。合入后 Linux Python 132/132 通过；Windows 122 通过、10 项平台跳过。GDB 确定性交错 200 次回归证据沿用已验收候选，组合单测包含对应回归。
+- 合入后 Go/独立 PostgreSQL 定向回归 87 个顶层测试通过（含子测试 257 通过、5 个 opt-in 跳过）。AFL 和原 native/GDB 两条真实链路另行启用，2 个顶层及合计 6 个测试/子测试通过，0 跳过。另三项逆向引擎/Hermes/浏览器条件测试本轮未执行，未计作通过。
+- 合入后真实 AFL 容器测试 5/5 通过，包括 stdin/file campaign、crash 独立重放、未插桩拒绝和取消清理；已有 8/8 启动取消及最终组合材料保留。测试仅使用本地合成样本，没有运行真实产品目标或调用真实模型。
+- Linux 与 Windows amd64 构建、自动更新包测试、发布脚本语法检查通过。前端源码沿用此前已通过的静态构建，标签流水线重新构建前端和五平台程序包。交叉编译及 ZIP 校验不等于所有平台完整运行验收。
+
+### 配置和保留限制
+
+- Native 与 Fuzzing 均需管理员准备实验环境、固定 image ID/digest 并授权任务材料和时长；`enabled` / `fuzz_enabled` 示例默认 false。AFL 只验证本地 Debian AFL++ 4.04c，普通 native 镜像不保证含 AFL++。本版不自动安装、拉取、启用或发布该实验镜像；主程序 GHCR 镜像与实验镜像不同。
+- 暂无持久后台 campaign 恢复/队列、多 worker、QEMU/Frida binary-only、网络服务 tube、完整交互 GDB TTY、自动 ROP/堆利用或自动 Finding。AFL stats/map、崩溃和 sanitizer 观察都不直接证明覆盖率、真实产品漏洞或可利用性。
+- 本地镜像运行通过不代表仓库 native Dockerfile 的在线 apt 重建已通过；传递依赖未全部锁定。此次也不是原设计 N01–N15 全矩阵或 ARTEX 全功能验收；额外场景与跳过项见验收说明。
+- 本次发布不自动升级或重启已有业务实例。已有部署需同步其 profile 实际引用的 Python runner；保留已有配置，不用示例覆盖当前环境。
+
+说明：[原生分析与重放](docs/native-linux-workflow.md)、[AFL++ 最小闭环](docs/native-fuzzing.md)、[验收范围](docs/native-release-validation.md)。下载：[v0.7.0 Release](https://github.com/cyy081021/ARTEX/releases/tag/v0.7.0)。主程序镜像：`ghcr.io/cyy081021/artex:v0.7.0`。
 
 <a id="v060"></a>
 
